@@ -1,0 +1,31 @@
+name: 监控系统状态
+
+on:
+  schedule:
+    # 每天北京时间10:00检查（运行后45分钟）
+    - cron: '0 2 * * 1-5'
+  workflow_dispatch:
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+        
+    - name: Install dependencies
+      run: pip install requests
+      
+    - name: Run monitor
+      run: python monitor.py
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
+        FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
+        FEISHU_TARGET: ${{ secrets.FEISHU_TARGET }}
