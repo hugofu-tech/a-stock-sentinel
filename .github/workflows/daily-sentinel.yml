@@ -1,0 +1,40 @@
+name: A股情绪晨间预警
+
+on:
+  schedule:
+    # 北京时间9:15 = UTC 1:15
+    - cron: '15 1 * * 1-5'
+  workflow_dispatch:  # 允许手动触发
+
+jobs:
+  sentiment-alert:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+        
+    - name: Install dependencies
+      run: |
+        pip install akshare pandas requests
+        
+    - name: Run sentiment analysis
+      run: |
+        python main.py
+      env:
+        FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
+        FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
+        FEISHU_TARGET: ${{ secrets.FEISHU_TARGET }}
+        
+    - name: Upload logs
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: execution-logs
+        path: '*.md'
+        retention-days: 7
