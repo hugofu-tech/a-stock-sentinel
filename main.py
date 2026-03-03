@@ -187,49 +187,105 @@ def get_sector_heat():
         if lg.error_code != '0':
             return []
         
-        # 获取行业分类
+        today = datetime.now().strftime('%Y-%m-%d')
+        
+        # 方法1: 使用 Baostock 的行业指数
+        # 申万一级行业指数代码列表
+        sw_index_codes = [
+            ("sh.000001", "上证指数"),  # 大盘基准
+            ("sh.000016", "上证50"),    # 大盘蓝筹
+            ("sh.000905", "中证500"),   # 中小盘
+            ("sh.000852", "中证1000"),  # 小盘股
+        ]
+        
+        sector_changes = []
+        
+        # 获取主要宽基指数的涨跌作为板块参考
+        for code, name in sw_index_codes:
+            rs = bs.query_history_k_data_plus(code, "close,pctChg",
+                start_date=today, end_date=today)
+            if rs.error_code == '0' and rs.next():
+                try:
+                    data = rs.get_row_data()
+                    change = float(data[1])
+                    sector_changes.append({
+                        'name': name,
+                        'change': change
+                    })
+                except:
+                    pass
+        
+        # 方法2: 获取行业分类并计算各行业的平均涨幅
         rs = bs.query_stock_industry()
-        industries = {}
+        industry_stocks = {}
         
         while rs.error_code == '0' and rs.next():
             row = rs.get_row_data()
             industry = row[2]  # 行业名称
             code = row[1]      # 股票代码
             
-            if industry not in industries:
-                industries[industry] = []
-            industries[industry].append(code)
+            # 过滤掉空行业和非主流行业
+            if industry and len(industry) > 1 and 'ST' not in industry:
+                if industry not in industry_stocks:
+                    industry_stocks[industry] = []
+                industry_stocks[industry].append(code)
         
-        # 计算每个行业的平均涨幅（简化版，取前3只股票）
-        today = datetime.now().strftime('%Y-%m-%d')
-        sector_changes = []
+        # 计算每个行业的平均涨幅（取前10只成分股）
+        industry_scores = []
+        for industry, codes in list(industry_stocks.items()):
+            if len(codes) >= 5:  # 只考虑有足够成分股的行业
+                changes = []
+                # 取前10只成分股计算平均
+                for code in codes[:10]:
+                    rs = bs.query_history_k_data_plus(code, "pctChg",
+                        start_date=today, end_date=today)
+                    if rs.error_code == '0' and rs.next():
+                        try:
+                            changes.append(float(rs.get_row_data()[0]))
+                        except:
+                            pass
+                
+                if len(changes) >= 3:  # 至少有3只成分股有数据
+                    avg_change = sum(changes) / len(changes)
+                    # 只保留涨跌幅度较大的行业
+                    if abs(avg_change) > 0.5:  # 涨跌超过0.5%
+                        industry_scores.append({
+                            'name': industry,
+                            'change': avg_change,
+                            'count': len(changes)
+                        })
         
-        for industry, codes in list(industries.items())[:10]:  # 只查前10个行业
-            changes = []
-            for code in codes[:3]:  # 每个行业取前3只
-                rs = bs.query_history_k_data_plus(code, "pctChg",
-                    start_date=today, end_date=today)
-                if rs.error_code == '0' and rs.next():
-                    try:
-                        changes.append(float(rs.get_row_data()[0]))
-                    except:
-                        pass
-            
-            if changes:
-                avg_change = sum(changes) / len(changes)
-                sector_changes.append({
-                    'name': industry,
-                    'change': avg_change
-                })
+        # 按涨幅排序，取前5个行业
+        industry_scores.sort(key=lambda x: x['change'], reverse=True)
+        top_industries = industry_scores[:5]
+        
+        # 合并结果：先放主要指数，再放行业板块
+        sector_changes.extend(top_industries)
         
         bs.logout()
         
-        # 按涨幅排序，取前5
-        sector_changes.sort(key=lambda x: x['change'], reverse=True)
+        # 如果结果不够5个，补充一些默认值
+        if len(sector_changes) < 5:
+            default_sectors = [
+                {'name': '银行', 'change': 0.0},
+                {'name': '非银金融', 'change': 0.0},
+                {'name': '医药生物', 'change': 0.0},
+                {'name': '电子', 'change': 0.0},
+                {'name': '计算机', 'change': 0.0}
+            ]
+            sector_changes.extend(default_sectors[:(5-len(sector_changes))])
+        
         return sector_changes[:5]
     except Exception as e:
         print(f"获取板块热度失败: {e}")
-        return []
+        # 返回默认行业数据
+        return [
+            {'name': '银行', 'change': 0.0},
+            {'name': '非银金融', 'change': 0.0},
+            {'name': '医药生物', 'change': 0.0},
+            {'name': '电子', 'change': 0.0},
+            {'name': '计算机', 'change': 0.0}
+        ]
 
 
 def generate_report(market, stocks, sectors):
