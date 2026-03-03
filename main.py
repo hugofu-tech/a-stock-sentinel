@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-A股情绪晨间预警系统 - Baostock版本
-解决akshare连接问题
+A股情绪晨间预警系统 - V2.0 专业版
+基于多维度情绪选股模型
+技术60% + 资金25% + 情绪15%
 """
 
 import os
@@ -10,16 +11,159 @@ import json
 import requests
 import baostock as bs
 import pandas as pd
+import numpy as np
 from datetime import datetime
 
-# 飞书配置从环境变量读取
+# 飞书配置
 FEISHU_APP_ID = os.environ.get('FEISHU_APP_ID', '')
 FEISHU_APP_SECRET = os.environ.get('FEISHU_APP_SECRET', '')
 FEISHU_TARGET = os.environ.get('FEISHU_TARGET', 'user:ou_0ad234b6ebfca4f424bd582393734d0f')
 
 
+class ProfessionalSentimentModel:
+    """
+    专业情绪评分模型 V2.0
+    多维度加权评分体系
+    """
+    
+    def calculate_score(self, stock):
+        """计算综合情绪得分 (0-100)"""
+        
+        # 技术面得分 (0-60)
+        technical = self._technical_score(stock)
+        
+        # 资金面得分 (0-25)
+        capital = self._capital_score(stock)
+        
+        # 情绪面得分 (0-15)
+        sentiment = self._sentiment_score(stock)
+        
+        # 加权综合
+        total = technical * 0.60 + capital * 0.25 + sentiment * 0.15
+        
+        return {
+            'total_score': round(total, 1),
+            'technical': round(technical, 1),
+            'capital': round(capital, 1),
+            'sentiment': round(sentiment, 1)
+        }
+    
+    def _technical_score(self, stock):
+        """技术面评分 (0-60分)"""
+        score = 0
+        
+        # 1. 涨幅评分 (0-20分) - 非线性
+        change = stock.get('change', 0)
+        if change >= 9.9:
+            score += 20  # 涨停
+        elif change >= 5:
+            score += 15 + (change - 5) * 0.8
+        elif change >= 2:
+            score += 10 + (change - 2) * 1.67
+        elif change > 0:
+            score += change * 5
+        elif change >= -2:
+            score += max(0, 5 + change * 2.5)
+        
+        # 2. 量比评分 (0-15分)
+        vol_ratio = stock.get('volume_ratio', 1)
+        if vol_ratio >= 3:
+            score += 15
+        elif vol_ratio >= 1.5:
+            score += 10 + (vol_ratio - 1.5) * 6.67
+        elif vol_ratio >= 0.8:
+            score += (vol_ratio - 0.8) * 11.9
+        
+        # 3. 换手率评分 (0-15分)
+        turnover = stock.get('turnover', 0)
+        if turnover >= 20:
+            score += 15
+        elif turnover >= 10:
+            score += 10 + (turnover - 10) * 0.5
+        elif turnover >= 3:
+            score += 5 + (turnover - 3) * 0.71
+        elif turnover >= 1:
+            score += (turnover - 1) * 2.5
+        
+        # 4. 成交额评分 (0-10分)
+        amount = stock.get('amount', 0)
+        if amount >= 10:  # 10亿+
+            score += 10
+        elif amount >= 5:
+            score += 7 + (amount - 5) * 0.6
+        elif amount >= 1:
+            score += 3 + (amount - 1) * 1
+        
+        return min(60, score)
+    
+    def _capital_score(self, stock):
+        """资金面评分 (0-25分)"""
+        score = 0
+        
+        # 资金强度 = 量比*0.6 + 换手率*0.4
+        vol_ratio = stock.get('volume_ratio', 1)
+        turnover = stock.get('turnover', 0)
+        strength = (vol_ratio * 0.6 + turnover * 0.4) / 10
+        
+        if strength >= 2:
+            score += 15
+        elif strength >= 1:
+            score += 7.5 + (strength - 1) * 7.5
+        else:
+            score += strength * 7.5
+        
+        # 量价配合
+        change = stock.get('change', 0)
+        if change > 0 and vol_ratio > 1.5:
+            score += 10
+        elif change > 0 and vol_ratio > 1:
+            score += 7
+        elif change > 0:
+            score += 5
+        
+        return min(25, score)
+    
+    def _sentiment_score(self, stock):
+        """情绪面评分 (0-15分)"""
+        change = stock.get('change', 0)
+        
+        if change >= 9.9:
+            return 15
+        elif change >= 7:
+            return 13
+        elif change >= 5:
+            return 11
+        elif change >= 3:
+            return 9
+        elif change >= 1:
+            return 6 + change * 0.5
+        elif change >= -1:
+            return max(0, 3 + change * 3)
+        elif change >= -3:
+            return max(0, 1.5 + (change + 3) * 0.75)
+        
+        return 0
+
+
+def get_signal(score_data):
+    """生成买卖信号"""
+    total = score_data['total_score']
+    technical = score_data['technical']
+    
+    if total >= 75 and technical >= 45:
+        return "🔴 STRONG BUY", "强烈买入"
+    elif total >= 60 and technical >= 35:
+        return "🟢 BUY", "买入"
+    elif total >= 45:
+        return "🟡 WATCH", "关注"
+    elif total >= 30:
+        return "⚪ HOLD", "持有"
+    else:
+        return "❄️ AVOID", "回避"
+
+
 def get_feishu_token():
-    """获取飞书access_token"""
+    """获取飞书token"""
     url = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
     headers = {"Content-Type": "application/json"}
     data = {"app_id": FEISHU_APP_ID, "app_secret": FEISHU_APP_SECRET}
@@ -29,270 +173,184 @@ def get_feishu_token():
         result = resp.json()
         if result.get('code') == 0:
             return result['tenant_access_token']
-        else:
-            print(f"获取token失败: {result}")
-            return None
     except Exception as e:
-        print(f"获取token异常: {e}")
-        return None
+        print(f"Token error: {e}")
+    return None
 
 
-def send_feishu_message(content, msg_type="text"):
+def send_feishu_message(content):
     """发送飞书消息"""
     token = get_feishu_token()
     if not token:
-        print("❌ 无法获取飞书token")
         return False
-    
-    receive_id_type = 'open_id'
-    receive_id = FEISHU_TARGET.replace('user:', '')
     
     url = "https://open.feishu.cn/open-apis/im/v1/messages"
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    params = {"receive_id_type": receive_id_type}
+    params = {"receive_id_type": "open_id"}
     
-    message_content = json.dumps({"text": content})
+    receive_id = FEISHU_TARGET.replace('user:', '')
     data = {
         "receive_id": receive_id,
-        "msg_type": msg_type,
-        "content": message_content
+        "msg_type": "text",
+        "content": json.dumps({"text": content})
     }
     
     try:
         resp = requests.post(url, json=data, headers=headers, params=params, timeout=30)
-        result = resp.json()
-        if result.get('code') == 0:
-            print(f"✅ 飞书消息发送成功")
-            return True
-        else:
-            print(f"❌ 发送失败: {result.get('msg', result)}")
-            return False
+        return resp.json().get('code') == 0
     except Exception as e:
-        print(f"❌ 发送异常: {e}")
+        print(f"Send error: {e}")
         return False
 
 
-def get_market_overview():
-    """获取市场概况 - 使用Baostock"""
-    try:
-        lg = bs.login()
-        if lg.error_code != '0':
-            print(f"登录失败: {lg.error_msg}")
-            return {}
-        
-        today = datetime.now().strftime('%Y-%m-%d')
-        indices = {}
-        
-        # 主要指数代码映射
-        index_codes = [
-            ("sh.000001", "sh", "上证指数"),
-            ("sz.399001", "sz", "深证成指"),
-            ("sz.399006", "cy", "创业板指")
-        ]
-        
-        for code, key, name in index_codes:
-            rs = bs.query_history_k_data_plus(code,
-                "date,close,pctChg",
-                start_date=today, end_date=today)
-            
-            if rs.error_code == '0' and rs.next():
-                data = rs.get_row_data()
-                indices[key] = {
-                    'name': name,
-                    'value': float(data[1]),
-                    'change': float(data[2])
-                }
-        
-        bs.logout()
-        return indices
-    except Exception as e:
-        print(f"获取市场概况失败: {e}")
+def get_market_data():
+    """获取市场数据"""
+    lg = bs.login()
+    if lg.error_code != '0':
         return {}
+    
+    today = datetime.now().strftime('%Y-%m-%d')
+    indices = {}
+    
+    for code, key, name in [
+        ("sh.000001", "sh", "上证指数"),
+        ("sz.399001", "sz", "深证成指"),
+        ("sz.399006", "cy", "创业板指")
+    ]:
+        rs = bs.query_history_k_data_plus(code, "close,pctChg",
+            start_date=today, end_date=today)
+        if rs.error_code == '0' and rs.next():
+            data = rs.get_row_data()
+            indices[key] = {
+                'name': name,
+                'value': float(data[0]),
+                'change': float(data[1])
+            }
+    
+    bs.logout()
+    return indices
 
 
-def get_stock_screener():
-    """全A股筛选 - 使用Baostock"""
-    try:
-        lg = bs.login()
-        if lg.error_code != '0':
-            return []
-        
-        today = datetime.now().strftime('%Y-%m-%d')
-        
-        # 获取所有A股代码
-        rs = bs.query_all_stock(day=today)
-        if rs.error_code != '0':
-            bs.logout()
-            return []
-        
-        stock_list = []
-        while rs.error_code == '0' and rs.next():
-            row = rs.get_row_data()
-            code = row[0]  # 股票代码
-            
-            # 获取每只股票今日行情
-            rs_k = bs.query_history_k_data_plus(code,
-                "code,close,preclose,pctChg,volume,amount,turn",
-                start_date=today, end_date=today)
-            
-            if rs_k.error_code == '0' and rs_k.next():
-                data = rs_k.get_row_data()
-                try:
-                    change = float(data[3])
-                    volume = float(data[4])
-                    amount = float(data[5])
-                    turnover = float(data[6])
-                    
-                    # 筛选条件
-                    if abs(change) < 15 and amount > 50000000 and change > 0:
-                        # 获取股票名称
-                        rs_name = bs.query_stock_basic(code=code)
-                        name = code
-                        if rs_name.error_code == '0' and rs_name.next():
-                            name = rs_name.get_row_data()[1]  # 股票名称
-                        
-                        # 情绪分 = 涨幅 * 换手率
-                        score = change * turnover
-                        
-                        stock_list.append({
-                            'name': name,
-                            'code': code,
-                            'price': float(data[1]),
-                            'change': change,
-                            'turnover': turnover,
-                            'amount': amount / 100000000,
-                            'score': round(score, 2)
-                        })
-                except:
-                    continue
-            
-            # 限制查询数量，避免太慢
-            if len(stock_list) > 100:
-                break
-        
-        bs.logout()
-        
-        # 按情绪分排序，取前5
-        stock_list.sort(key=lambda x: x['score'], reverse=True)
-        return stock_list[:5]
-    except Exception as e:
-        print(f"选股失败: {e}")
+def get_stock_data():
+    """获取股票数据并选股"""
+    lg = bs.login()
+    if lg.error_code != '0':
         return []
-
-
-def get_sector_heat():
-    """获取板块热度 - 使用Baostock行业数据"""
-    try:
-        lg = bs.login()
-        if lg.error_code != '0':
-            return []
+    
+    today = datetime.now().strftime('%Y-%m-%d')
+    
+    # 获取A股列表（简化版，取前200只）
+    rs = bs.query_all_stock(day=today)
+    stock_list = []
+    count = 0
+    
+    while rs.error_code == '0' and rs.next() and count < 800:
+        row = rs.get_row_data()
+        code = row[0]  # 格式: sh.600000 或 sz.000001
         
-        today = datetime.now().strftime('%Y-%m-%d')
+        # 精确过滤：只选A股个股
+        # 沪市: 600/601/603/605(主板), 688(科创)
+        # 深市: 000/001/002/003(主板), 300/301(创业)
+        is_sh_stock = (
+            code.startswith('sh.600') or 
+            code.startswith('sh.601') or 
+            code.startswith('sh.603') or
+            code.startswith('sh.605') or
+            code.startswith('sh.688')
+        )
+        is_sz_stock = (
+            code.startswith('sz.000') or
+            code.startswith('sz.001') or
+            code.startswith('sz.002') or
+            code.startswith('sz.003') or
+            code.startswith('sz.300') or
+            code.startswith('sz.301')
+        )
         
-        # 方法1: 使用 Baostock 的行业指数
-        # 申万一级行业指数代码列表
-        sw_index_codes = [
-            ("sh.000001", "上证指数"),  # 大盘基准
-            ("sh.000016", "上证50"),    # 大盘蓝筹
-            ("sh.000905", "中证500"),   # 中小盘
-            ("sh.000852", "中证1000"),  # 小盘股
-        ]
+        if not (is_sh_stock or is_sz_stock):
+            continue  # 跳过指数、ETF、债券等
         
-        sector_changes = []
+        # 获取行情
+        rs_k = bs.query_history_k_data_plus(code,
+            "code,close,preclose,pctChg,volume,amount,turn",
+            start_date=today, end_date=today)
         
-        # 获取主要宽基指数的涨跌作为板块参考
-        for code, name in sw_index_codes:
-            rs = bs.query_history_k_data_plus(code, "close,pctChg",
-                start_date=today, end_date=today)
-            if rs.error_code == '0' and rs.next():
-                try:
-                    data = rs.get_row_data()
-                    change = float(data[1])
-                    sector_changes.append({
-                        'name': name,
-                        'change': change
-                    })
-                except:
-                    pass
-        
-        # 方法2: 获取行业分类并计算各行业的平均涨幅
-        rs = bs.query_stock_industry()
-        industry_stocks = {}
-        
-        while rs.error_code == '0' and rs.next():
-            row = rs.get_row_data()
-            industry = row[2]  # 行业名称
-            code = row[1]      # 股票代码
-            
-            # 过滤掉空行业和非主流行业
-            if industry and len(industry) > 1 and 'ST' not in industry:
-                if industry not in industry_stocks:
-                    industry_stocks[industry] = []
-                industry_stocks[industry].append(code)
-        
-        # 计算每个行业的平均涨幅（取前10只成分股）
-        industry_scores = []
-        for industry, codes in list(industry_stocks.items()):
-            if len(codes) >= 5:  # 只考虑有足够成分股的行业
-                changes = []
-                # 取前10只成分股计算平均
-                for code in codes[:10]:
-                    rs = bs.query_history_k_data_plus(code, "pctChg",
-                        start_date=today, end_date=today)
-                    if rs.error_code == '0' and rs.next():
-                        try:
-                            changes.append(float(rs.get_row_data()[0]))
-                        except:
-                            pass
+        if rs_k.error_code == '0' and rs_k.next():
+            data = rs_k.get_row_data()
+            try:
+                change = float(data[3])
+                turnover = float(data[6])
+                amount = float(data[5]) / 100000000  # 亿
                 
-                if len(changes) >= 3:  # 至少有3只成分股有数据
-                    avg_change = sum(changes) / len(changes)
-                    # 只保留涨跌幅度较大的行业
-                    if abs(avg_change) > 0.5:  # 涨跌超过0.5%
-                        industry_scores.append({
-                            'name': industry,
-                            'change': avg_change,
-                            'count': len(changes)
-                        })
+                # 基础筛选
+                if 0 < change < 15 and amount > 0.5 and turnover > 1:
+                    # 获取名称
+                    rs_name = bs.query_stock_basic(code=code)
+                    name = code
+                    if rs_name.error_code == '0' and rs_name.next():
+                        name = rs_name.get_row_data()[1]
+                    
+                    # 计算量比 (简化：用换手率近似)
+                    volume_ratio = turnover / 3  # 假设平均换手3%
+                    
+                    stock_list.append({
+                        'name': name,
+                        'code': code,
+                        'price': float(data[1]),
+                        'change': change,
+                        'turnover': turnover,
+                        'volume_ratio': volume_ratio,
+                        'amount': amount
+                    })
+            except:
+                pass
         
-        # 按涨幅排序，取前5个行业
-        industry_scores.sort(key=lambda x: x['change'], reverse=True)
-        top_industries = industry_scores[:5]
-        
-        # 合并结果：先放主要指数，再放行业板块
-        sector_changes.extend(top_industries)
-        
-        bs.logout()
-        
-        # 如果结果不够5个，补充一些默认值
-        if len(sector_changes) < 5:
-            default_sectors = [
-                {'name': '银行', 'change': 0.0},
-                {'name': '非银金融', 'change': 0.0},
-                {'name': '医药生物', 'change': 0.0},
-                {'name': '电子', 'change': 0.0},
-                {'name': '计算机', 'change': 0.0}
-            ]
-            sector_changes.extend(default_sectors[:(5-len(sector_changes))])
-        
-        return sector_changes[:5]
-    except Exception as e:
-        print(f"获取板块热度失败: {e}")
-        # 返回默认行业数据
-        return [
-            {'name': '银行', 'change': 0.0},
-            {'name': '非银金融', 'change': 0.0},
-            {'name': '医药生物', 'change': 0.0},
-            {'name': '电子', 'change': 0.0},
-            {'name': '计算机', 'change': 0.0}
-        ]
+        count += 1
+    
+    bs.logout()
+    return stock_list
 
 
-def generate_report(market, stocks, sectors):
-    """生成报告"""
+def main():
+    print("🚀 A股情绪晨间预警 V2.0 专业版")
+    print("="*60)
+    print(f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+    
+    # 初始化模型
+    model = ProfessionalSentimentModel()
+    
+    # 获取市场数据
+    print("📊 获取市场数据...")
+    market = get_market_data()
+    print(f"✅ {len(market)} 个指数")
+    
+    # 获取股票
+    print("\n🔍 全市场扫描...")
+    stocks = get_stock_data()
+    print(f"✅ {len(stocks)} 只股票通过初筛")
+    
+    # 评分
+    print("\n🎯 专业情绪评分...")
+    scored_stocks = []
+    for stock in stocks:
+        score_data = model.calculate_score(stock)
+        signal, desc = get_signal(score_data)
+        
+        scored_stocks.append({
+            **stock,
+            **score_data,
+            'signal': signal,
+            'signal_desc': desc
+        })
+    
+    # 排序取前5
+    scored_stocks.sort(key=lambda x: x['total_score'], reverse=True)
+    top5 = scored_stocks[:5]
+    
+    # 生成报告
+    print("\n📝 生成报告...")
     now = datetime.now().strftime('%m月%d日 %H:%M')
     
-    # 市场概况
     market_text = ""
     for key in ['sh', 'sz', 'cy']:
         if key in market:
@@ -300,86 +358,47 @@ def generate_report(market, stocks, sectors):
             emoji = "📈" if m['change'] >= 0 else "📉"
             market_text += f"{emoji} {m['name']}: {m['value']:.2f} ({m['change']:+.2f}%)\n"
     
-    if not market_text:
-        market_text = "暂无数据\n"
-    
-    # 板块热度
-    sector_text = ""
-    for i, s in enumerate(sectors, 1):
-        emoji = "🔥" if s['change'] > 0 else "❄️"
-        sector_text += f"{i}. {emoji} {s['name']}: {s['change']:+.2f}%\n"
-    
-    if not sector_text:
-        sector_text = "暂无数据\n"
-    
-    # 选股TOP5
     stock_text = ""
-    for i, s in enumerate(stocks, 1):
+    for i, s in enumerate(top5, 1):
         emoji = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣"][i-1]
-        signal = "🔴 BUY" if s['change'] > 5 else "🟡 WATCH" if s['change'] > 2 else "⚪ HOLD"
         
         stock_text += f"{emoji} {s['name']}({s['code']})\n"
         stock_text += f"   价格: ¥{s['price']:.2f} | 涨幅: {s['change']:+.2f}% | 换手: {s['turnover']:.1f}%\n"
-        stock_text += f"   情绪分: {s['score']:.1f} | 信号: {signal}\n\n"
+        stock_text += f"   📊 综合: {s['total_score']:.1f} | 技术: {s['technical']:.1f} | 资金: {s['capital']:.1f} | 情绪: {s['sentiment']:.1f}\n"
+        stock_text += f"   💡 信号: {s['signal']} ({s['signal_desc']})\n\n"
     
-    if not stock_text:
-        stock_text = "暂无数据\n"
-    
-    report = f"""📊 A股情绪晨间预警 | {now}
+    report = f"""📊 A股情绪晨间预警 V2.0 | {now}
 
 📈 市场概况
 {market_text}
-🔥 板块热度TOP5
-{sector_text}
-🎯 情绪选股TOP5
+🎯 情绪选股TOP5 (专业版)
 {stock_text}
-⚠️ 免责声明：本报告仅供参考，不构成投资建议。投资有风险，入市需谨慎。"""
-    
-    return report
+📊 V2.0评分体系:
+• 技术面60%: 涨幅+量比+换手+成交额
+• 资金面25%: 资金强度+量价配合  
+• 情绪面15%: 市场情绪传导
 
-
-def main():
-    print("🚀 A股情绪晨间预警系统 (Baostock版)")
-    print("=" * 50)
-    print(f"⏰ 运行时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+⚠️ 免责声明：仅供参考，不构成投资建议。"""
     
-    # 检查配置
-    if not FEISHU_APP_ID or not FEISHU_APP_SECRET:
-        print("❌ 未设置飞书APP ID或Secret")
-        return
+    print(report[:800] + "...")
     
-    # 获取数据
-    print("📊 正在获取市场数据...")
-    market = get_market_overview()
-    print(f"✅ 获取到 {len(market)} 个指数")
+    # 保存并发送
+    filename = f'report_v2_{datetime.now().strftime("%Y%m%d")}.md'
+    with open(filename, 'w', encoding='utf-8') as f:
+        f.write(report)
     
-    print("\n🔍 正在全市场选股...")
-    stocks = get_stock_screener()
-    print(f"✅ 选出 {len(stocks)} 只股票")
-    
-    print("\n🔥 正在获取板块热度...")
-    sectors = get_sector_heat()
-    print(f"✅ 获取到 {len(sectors)} 个板块")
-    
-    # 生成报告
-    print("\n📝 正在生成报告...")
-    report = generate_report(market, stocks, sectors)
-    print(report[:500] + "...")
+    print(f"\n📄 已保存: {filename}")
     
     # 发送到飞书
-    print("\n📤 正在推送到飞书...")
-    success = send_feishu_message(report)
-    
-    if success:
-        print("\n✅ 完成! 飞书消息已发送")
-        # 保存报告
-        filename = f'report_{datetime.now().strftime("%Y%m%d")}.md'
-        with open(filename, 'w', encoding='utf-8') as f:
-            f.write(report)
-        print(f"📄 报告已保存到 {filename}")
+    if FEISHU_APP_ID and FEISHU_APP_SECRET:
+        print("\n📤 发送到飞书...")
+        if send_feishu_message(report):
+            print("✅ 发送成功!")
+        else:
+            print("❌ 发送失败")
     else:
-        print("\n❌ 飞书消息发送失败!", file=sys.stderr)
-        sys.exit(1)
+        print("\n⚠️  未配置飞书凭据，跳过发送")
+        print(report)
 
 
 if __name__ == "__main__":
