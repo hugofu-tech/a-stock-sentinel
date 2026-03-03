@@ -81,10 +81,10 @@ def send_feishu_message(content, msg_type="text"):
         resp = requests.post(url, json=data, headers=headers, params=params, timeout=30)
         result = resp.json()
         if result.get('code') == 0:
-            print("✅ 飞书消息发送成功")
+            print(f"✅ 飞书消息发送成功 (msg_id: {result.get('data', {}).get('message_id', 'unknown')})")
             return True
         else:
-            print(f"❌ 发送失败: {result}")
+            print(f"❌ 发送失败: {result.get('msg', result)}")
             return False
     except Exception as e:
         print(f"❌ 发送异常: {e}")
@@ -244,9 +244,17 @@ def main():
     
     # 发送到飞书
     print("\n📤 正在推送到飞书...")
-    send_feishu_message(report)
+    success = send_feishu_message(report)
     
-    print("\n✅ 完成!")
+    if success:
+        print("\n✅ 完成! 飞书消息已发送")
+        # 保存报告到文件
+        with open(f'report_{datetime.now().strftime("%Y%m%d")}.md', 'w', encoding='utf-8') as f:
+            f.write(report)
+        print(f"📄 报告已保存到 report_{datetime.now().strftime('%Y%m%d')}.md")
+    else:
+        print("\n❌ 飞书消息发送失败!", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
