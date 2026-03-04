@@ -12,12 +12,38 @@ import requests
 import baostock as bs
 import pandas as pd
 import numpy as np
-from datetime import datetime
+from datetime import datetime, timedelta
+import pytz
 
 # 飞书配置
 FEISHU_APP_ID = os.environ.get('FEISHU_APP_ID', '')
 FEISHU_APP_SECRET = os.environ.get('FEISHU_APP_SECRET', '')
 FEISHU_TARGET = os.environ.get('FEISHU_TARGET', 'user:ou_0ad234b6ebfca4f424bd582393734d0f')
+
+# 设置北京时区
+beijing_tz = pytz.timezone('Asia/Shanghai')
+
+def get_trade_date():
+    """获取当前交易日期（北京时间）
+    如果在开盘前，返回上一个交易日
+    """
+    now = datetime.now(beijing_tz)
+    
+    # 如果是周末，返回周五
+    if now.weekday() >= 5:  # 周六=5, 周日=6
+        days_back = now.weekday() - 4  # 周六→1天前(周五), 周日→2天前(周五)
+        trade_date = now - timedelta(days=days_back)
+        return trade_date.strftime('%Y-%m-%d')
+    
+    # 如果是工作日但开盘前(9:30前)，返回上一个交易日
+    if now.hour < 9 or (now.hour == 9 and now.minute < 30):
+        if now.weekday() == 0:  # 周一开盘前，返回上周五
+            trade_date = now - timedelta(days=3)
+        else:
+            trade_date = now - timedelta(days=1)
+        return trade_date.strftime('%Y-%m-%d')
+    
+    return now.strftime('%Y-%m-%d')
 
 
 class ProfessionalSentimentModel:
@@ -209,7 +235,11 @@ def get_market_data():
     if lg.error_code != '0':
         return {}
     
-    today = datetime.now().strftime('%Y-%m-%d')
+    trade_date = get_trade_date()
+    today_str = datetime.now(beijing_tz).strftime('%Y-%m-%d')
+    
+    print(f"📅 交易日期: {trade_date} (今天: {today_str})")
+    
     indices = {}
     
     for code, key, name in [
@@ -218,7 +248,7 @@ def get_market_data():
         ("sz.399006", "cy", "创业板指")
     ]:
         rs = bs.query_history_k_data_plus(code, "close,pctChg",
-            start_date=today, end_date=today)
+            start_date=trade_date, end_date=trade_date)
         if rs.error_code == '0' and rs.next():
             data = rs.get_row_data()
             indices[key] = {
@@ -226,6 +256,8 @@ def get_market_data():
                 'value': float(data[0]),
                 'change': float(data[1])
             }
+        else:
+            print(f"⚠️  {name} 数据未获取")
     
     bs.logout()
     return indices
@@ -237,10 +269,11 @@ def get_stock_data():
     if lg.error_code != '0':
         return []
     
-    today = datetime.now().strftime('%Y-%m-%d')
+    trade_date = get_trade_date()
+    print(f"🔍 扫描 {trade_date} 的数据...")
     
-    # 获取A股列表（简化版，取前200只）
-    rs = bs.query_all_stock(day=today)
+    # 获取A股列表
+    rs = bs.query_all_stock(day=trade_date)
     stock_list = []
     count = 0
     
@@ -312,9 +345,18 @@ def get_stock_data():
 
 
 def main():
+    # 使用北京时间
+    now = datetime.now(beijing_tz)
+    trade_date = get_trade_date()
+    
     print("🚀 A股情绪晨间预警 V2.0 专业版")
     print("="*60)
-    print(f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+    print(f"⏰ 北京时间: {now.strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"📅 交易日期: {trade_date}\n")
+    
+    # 开盘前提醒
+    if trade_date != now.strftime('%Y-%m-%d'):
+        print("🌙 当前为开盘前，使用上一交易日数据\n")
     
     # 初始化模型
     model = ProfessionalSentimentModel()
@@ -349,7 +391,7 @@ def main():
     
     # 生成报告
     print("\n📝 生成报告...")
-    now = datetime.now().strftime('%m月%d日 %H:%M')
+    report_time = now.strftime('%m月%d日 %H:%M')
     
     market_text = ""
     for key in ['sh', 'sz', 'cy']:
@@ -367,7 +409,7 @@ def main():
         stock_text += f"   📊 综合: {s['total_score']:.1f} | 技术: {s['technical']:.1f} | 资金: {s['capital']:.1f} | 情绪: {s['sentiment']:.1f}\n"
         stock_text += f"   💡 信号: {s['signal']} ({s['signal_desc']})\n\n"
     
-    report = f"""📊 A股情绪晨间预警 V2.0 | {now}
+    report = f"""📊 A股情绪晨间预警 V2.0 | {report_time}
 
 📈 市场概况
 {market_text}
@@ -382,8 +424,8 @@ def main():
     
     print(report[:800] + "...")
     
-    # 保存并发送
-    filename = f'report_v2_{datetime.now().strftime("%Y%m%d")}.md'
+    # 保存并发送 - 使用实际日期命名文件
+    filename = f'report_v2_{now.strftime("%Y%m%d")}.md'
     with open(filename, 'w', encoding='utf-8') as f:
         f.write(report)
     
