@@ -5,6 +5,7 @@
 """
 
 import re
+import time
 import logging
 import warnings
 from datetime import datetime
@@ -20,6 +21,10 @@ from storage.models import SocialPost
 warnings.filterwarnings("ignore", category=InsecureRequestWarning)
 
 logger = logging.getLogger(__name__)
+
+# Cookie lifetime before forced refresh (25 minutes; xueqiu tokens typically
+# expire after ~30 min of inactivity).
+_COOKIE_TTL_SECONDS = 25 * 60
 
 
 class XueqiuCrawler(BaseSocialSource):
@@ -64,6 +69,7 @@ class XueqiuCrawler(BaseSocialSource):
         )
         self.session = requests.Session()
         self._cookie_initialized = False
+        self._cookie_init_time: float = 0.0
 
     # ------------------------------------------------------------------
     # Public interface
@@ -141,10 +147,21 @@ class XueqiuCrawler(BaseSocialSource):
     def _ensure_cookies(self):
         """确保session中有有效的cookie
 
-        首次访问雪球首页获取 xq_a_token 等cookie。
+        首次调用或cookie过期时，访问雪球首页获取 xq_a_token 等cookie。
+        雪球的cookie大约30分钟过期，这里在25分钟时主动刷新。
         """
-        if self._cookie_initialized:
+        now = time.time()
+        cookie_expired = (
+            now - self._cookie_init_time > _COOKIE_TTL_SECONDS
+        )
+
+        if self._cookie_initialized and not cookie_expired:
             return
+
+        if cookie_expired and self._cookie_initialized:
+            logger.info("[xueqiu] cookie 已过期，正在刷新...")
+            # Clear old cookies so the server issues fresh ones
+            self.session.cookies.clear()
 
         self._rate_limit()
         try:
@@ -153,6 +170,7 @@ class XueqiuCrawler(BaseSocialSource):
                           "q=0.9,image/webp,*/*;q=0.8",
                 "Referer": "https://www.google.com/",
             })
+            # Step 1: Visit the homepage to get initial cookies
             resp = self.session.get(
                 self.BASE_URL,
                 headers=headers,
@@ -160,11 +178,41 @@ class XueqiuCrawler(BaseSocialSource):
                 verify=False,
             )
             resp.raise_for_status()
+
+            # Step 2: Verify we received the critical xq_a_token cookie
+            token = self.session.cookies.get("xq_a_token")
+            if not token:
+                logger.warning(
+                    "[xueqiu] 首页未返回 xq_a_token cookie，"
+                    "尝试访问股票页面获取..."
+                )
+                self._rate_limit()
+                resp2 = self.session.get(
+                    f"{self.BASE_URL}/S/SH600519",
+                    headers=self._build_headers({
+                        "Accept": "text/html,application/xhtml+xml,"
+                                  "application/xml;q=0.9,*/*;q=0.8",
+                        "Referer": self.BASE_URL + "/",
+                    }),
+                    timeout=self.timeout,
+                    verify=False,
+                )
+                resp2.raise_for_status()
+
             self._cookie_initialized = True
-            logger.debug("[xueqiu] cookie 初始化成功")
+            self._cookie_init_time = now
+            logger.debug(
+                "[xueqiu] cookie 初始化成功, "
+                f"cookies={list(self.session.cookies.keys())}"
+            )
         except Exception as e:
             logger.error(f"[xueqiu] cookie 初始化失败: {e}")
             raise
+
+    def _invalidate_cookies(self):
+        """标记cookie为无效，下次请求时会重新获取"""
+        self._cookie_initialized = False
+        self._cookie_init_time = 0.0
 
     # ------------------------------------------------------------------
     # Stock code mapping
@@ -213,6 +261,15 @@ class XueqiuCrawler(BaseSocialSource):
         resp = self.session.get(
             url, headers=headers, timeout=self.timeout, verify=False
         )
+
+        # 403 typically means cookie expired; refresh and let retry loop
+        # handle the next attempt.
+        if resp.status_code == 403:
+            logger.warning("[xueqiu] 收到403，cookie可能过期，强制刷新")
+            self._invalidate_cookies()
+            self._ensure_cookies()
+            resp.raise_for_status()  # still raise to trigger retry
+
         resp.raise_for_status()
         data = resp.json()
 
@@ -242,6 +299,13 @@ class XueqiuCrawler(BaseSocialSource):
         resp = self.session.get(
             url, headers=headers, timeout=self.timeout, verify=False
         )
+
+        if resp.status_code == 403:
+            logger.warning("[xueqiu] search 收到403，cookie可能过期，强制刷新")
+            self._invalidate_cookies()
+            self._ensure_cookies()
+            resp.raise_for_status()
+
         resp.raise_for_status()
         data = resp.json()
 
@@ -346,3 +410,20 @@ class XueqiuCrawler(BaseSocialSource):
         clean = re.sub(r"<[^>]+>", "", text)
         clean = clean.strip()
         return clean
+
+    def close(self):
+        """关闭HTTP会话，释放连接池资源"""
+        try:
+            self.session.close()
+        except Exception:
+            pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+        return False
+
+    def __del__(self):
+        self.close()
