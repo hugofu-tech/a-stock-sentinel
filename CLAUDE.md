@@ -23,7 +23,17 @@
 - [x] storage/sqlite_store.py — SQLite存储层 (帖子、情绪分数、推荐记录、回测结果)
 - [x] social/base_source.py — 爬虫抽象基类 (rate limit, 重试, UA轮换)
 - [ ] config.py — 扩展配置
-- [ ] 验证测试
+- [x] 验证测试（全部通过）
+
+### 2026-03-26 Phase 1: 东方财富股吧 + NLP + 回测
+- [x] social/eastmoney_guba.py — 股吧爬虫（双策略：API+HTML降级）
+- [x] nlp/snownlp_analyzer.py — SnowNLP批量分析器
+- [x] nlp/sentiment_scorer.py — 多源情绪评分聚合+时间衰减
+- [x] backtest/engine.py — 回测引擎（T+1、手续费、止损止盈）
+- [x] backtest/metrics.py — 绩效指标（夏普、回撤、胜率等）
+- [x] 集成测试通过
+- [ ] 股吧实际爬取测试
+- **发现**: SnowNLP对中文股评精度有限，LLM验证层(Phase 5)将弥补
 
 ## 关键决策记录
 1. **为什么SnowNLP+LLM混合**: 10000条文本纯LLM太贵(>$30/天)，SnowNLP<2分钟处理完，LLM仅验证Top10(<$1/天)

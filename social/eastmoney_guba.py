@@ -272,9 +272,13 @@ class EastMoneyGuba(BaseSocialSource):
 
     def _fetch_via_html(self, stock_code: str, stock_name: str,
                         limit: int) -> List[SocialPost]:
-        """通过解析股吧HTML页面获取帖子（备用方案）"""
+        """通过解析股吧HTML页面中嵌入的JSON数据获取帖子
+
+        股吧页面是SPA应用，但在HTML中嵌入了 `var article_list={...};`
+        包含完整的帖子列表数据。
+        """
         posts: List[SocialPost] = []
-        pages_needed = max(1, (limit + 29) // 30)  # 每页约30条
+        pages_needed = max(1, (limit + 79) // 80)  # 每页约80条
 
         for page in range(1, pages_needed + 1):
             if len(posts) >= limit:
@@ -294,113 +298,53 @@ class EastMoneyGuba(BaseSocialSource):
             resp.raise_for_status()
             resp.encoding = "utf-8"
 
-            page_posts = self._parse_html_page(
+            page_posts = self._parse_embedded_json(
                 resp.text, stock_code, stock_name
             )
             posts.extend(page_posts)
 
             if not page_posts:
-                # 当前页为空说明没有更多数据
                 break
 
         return posts[:limit]
 
-    def _parse_html_page(self, html: str, stock_code: str,
-                         stock_name: str) -> List[SocialPost]:
-        """解析股吧列表页HTML，提取帖子信息"""
+    def _parse_embedded_json(self, html: str, stock_code: str,
+                             stock_name: str) -> List[SocialPost]:
+        """从HTML中提取嵌入的 var article_list={...}; JSON数据"""
+        import json
+
         posts: List[SocialPost] = []
-        soup = BeautifulSoup(html, "html.parser")
 
-        # 股吧帖子列表通常在 <div class="articleh"> 或 <div class="listitem">
-        # 或表格 <table id="mainlist"> 的行中
-        rows = (
-            soup.select("div.articleh")
-            or soup.select("div.listitem")
-            or soup.select("div.normal_post")
-        )
+        match = re.search(r'var\s+article_list\s*=\s*(\{.*?\})\s*;', html, re.DOTALL)
+        if not match:
+            logger.debug(f"[eastmoney] 未找到 article_list 嵌入数据")
+            return posts
 
-        # 如果上述选择器都不命中，尝试通用的帖子链接提取
-        if not rows:
-            rows = soup.select("ul.newlist li") or []
+        try:
+            data = json.loads(match.group(1))
+        except json.JSONDecodeError as e:
+            logger.warning(f"[eastmoney] 解析嵌入JSON失败: {e}")
+            return posts
 
-        for row in rows:
+        post_list = data.get("re", [])
+        if not post_list:
+            return posts
+
+        for item in post_list:
             try:
-                post = self._parse_html_row(row, stock_code, stock_name)
+                post = self._parse_api_item(item, stock_code, stock_name)
                 if post:
+                    # 补充HTML方式可获取的额外字段
+                    post.like_count = self._safe_int(
+                        item.get("post_like_count", 0)
+                    )
                     posts.append(post)
             except Exception as e:
-                logger.debug(f"[eastmoney] HTML行解析失败: {e}")
+                logger.debug(f"[eastmoney] 解析嵌入帖子失败: {e}")
                 continue
 
+        logger.info(f"[eastmoney] 从嵌入JSON获取 {stock_code} 帖子 {len(posts)} 条")
         return posts
-
-    def _parse_html_row(self, row, stock_code: str,
-                        stock_name: str) -> Optional[SocialPost]:
-        """解析单行HTML帖子数据"""
-        # 提取标题和链接
-        link_tag = (
-            row.select_one("span.l3 a")
-            or row.select_one("a.note")
-            or row.select_one("a[href*='/news,']")
-            or row.select_one("a[title]")
-        )
-        if not link_tag:
-            return None
-
-        title = (link_tag.get("title") or link_tag.get_text()).strip()
-        if not title:
-            return None
-
-        # 过滤置顶/广告贴（常见特征）
-        row_text = row.get_text()
-        if any(kw in title for kw in ("广告", "公告", "问董秘")):
-            return None
-
-        href = link_tag.get("href", "")
-        url = href if href.startswith("http") else f"https://guba.eastmoney.com{href}"
-
-        # 阅读数
-        read_tag = row.select_one("span.l1") or row.select_one(".read")
-        read_count = self._safe_int(
-            read_tag.get_text().strip() if read_tag else 0
-        )
-
-        # 评论数
-        comment_tag = row.select_one("span.l2") or row.select_one(".reply")
-        comment_count = self._safe_int(
-            comment_tag.get_text().strip() if comment_tag else 0
-        )
-
-        # 作者
-        author_tag = (
-            row.select_one("span.l4 a")
-            or row.select_one(".author a")
-            or row.select_one("a.name")
-        )
-        author = author_tag.get_text().strip() if author_tag else "匿名"
-
-        # 发布时间
-        time_tag = (
-            row.select_one("span.l5")
-            or row.select_one("span.l6")
-            or row.select_one(".update")
-            or row.select_one(".time")
-        )
-        time_str = time_tag.get_text().strip() if time_tag else ""
-        publish_time = self._parse_time(time_str)
-
-        return SocialPost(
-            source="eastmoney",
-            stock_code=stock_code,
-            stock_name=stock_name,
-            title=title,
-            content="",
-            author=author,
-            publish_time=publish_time,
-            url=url,
-            read_count=read_count,
-            comment_count=comment_count,
-        )
 
     # ------------------------------------------------------------------
     # Utility helpers
