@@ -13,14 +13,18 @@ import re
 import json
 import logging
 import urllib.parse
+import warnings
 from datetime import datetime
 from typing import List, Optional
 
 import requests
+from urllib3.exceptions import InsecureRequestWarning
 from bs4 import BeautifulSoup
 
 from social.base_source import BaseSocialSource
 from storage.models import SocialPost
+
+warnings.filterwarnings("ignore", category=InsecureRequestWarning)
 
 logger = logging.getLogger(__name__)
 
@@ -53,8 +57,11 @@ class ShizifengyunCrawler(BaseSocialSource):
             timeout=timeout,
         )
         self.session = requests.Session()
+        self.session.verify = False
         self.session.headers.update(self._build_headers({
             "Referer": self.BASE_URL + "/",
+            "Accept": "text/html,application/xhtml+xml,application/xml;"
+                      "q=0.9,application/json,*/*;q=0.8",
         }))
 
     # ------------------------------------------------------------------
@@ -187,8 +194,20 @@ class ShizifengyunCrawler(BaseSocialSource):
             self.SEARCH_API_URL,
             params=params,
             timeout=self.timeout,
-            verify=False,
         )
+
+        # Handle rate limiting (429) with a brief pause
+        if resp.status_code == 429:
+            import time
+            retry_after = int(resp.headers.get("Retry-After", "5"))
+            logger.warning(
+                f"[shizifengyun] 触发限流(429)，等待 {retry_after} 秒"
+            )
+            time.sleep(min(retry_after, 30))
+            raise requests.exceptions.HTTPError(
+                f"429 Too Many Requests", response=resp
+            )
+
         resp.raise_for_status()
         resp.encoding = "utf-8"
 

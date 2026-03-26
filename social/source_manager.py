@@ -4,6 +4,7 @@
 提供健康检查、批量采集、权重归一化等功能，支持优雅降级。
 """
 
+import time
 import logging
 from typing import Dict, List, Optional
 
@@ -11,6 +12,9 @@ from storage.models import SocialPost
 import config
 
 logger = logging.getLogger(__name__)
+
+# How often to re-check unhealthy sources (in seconds).
+_HEALTH_RECHECK_INTERVAL = 30 * 60  # 30 minutes
 
 # 数据源名称到模块/类的映射
 _SOURCE_REGISTRY = {
@@ -34,6 +38,7 @@ class SourceManager:
         self.sources = {}           # name -> source instance
         self.source_configs = {}    # name -> config dict
         self._health_status = {}    # name -> bool (最近一次健康检查结果)
+        self._health_check_time = {}  # name -> float (上次健康检查时间戳)
         self._post_counts = {}     # name -> int (累计采集帖子数)
 
         source_configs = getattr(config, 'SOCIAL_SOURCES', {})
