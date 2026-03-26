@@ -463,7 +463,30 @@ class SentimentScheduler:
         except Exception as exc:
             logger.warning("[StockUniverse] akshare 调用失败: %s", exc)
 
-        # 回退
+        # 尝试 baostock 备选
+        try:
+            import baostock as bs
+            logger.info("[StockUniverse] akshare不可用，尝试 baostock...")
+            bs.login()
+            rs = bs.query_stock_basic(code_name="", code="")
+            stocks_data = []
+            while rs.error_code == '0' and rs.next():
+                row = rs.get_row_data()
+                # row: [code, code_name, ipoDate, outDate, type, status]
+                if len(row) >= 6 and row[4] == '1' and row[5] == '1':  # type=股票, status=上市
+                    code = row[0].replace('sh.', '').replace('sz.', '')
+                    name = row[1]
+                    # 排除ST
+                    if 'ST' not in name and '*ST' not in name:
+                        stocks_data.append({"code": code, "name": name})
+            bs.logout()
+            if stocks_data:
+                logger.info("[StockUniverse] baostock: %d 只股票", len(stocks_data))
+                return stocks_data[:500]  # 限制数量，避免采集过慢
+        except Exception as exc:
+            logger.warning("[StockUniverse] baostock 也失败: %s", exc)
+
+        # 最终回退
         logger.info(
             "[StockUniverse] 使用默认股票列表 (%d 只)", len(_DEFAULT_STOCKS)
         )
