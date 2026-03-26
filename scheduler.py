@@ -777,26 +777,38 @@ class SentimentScheduler:
         return "\n".join(lines)
 
     def _send_notification(self, report: str) -> None:
-        """发送通知报告（飞书）。"""
-        if not self.pusher:
-            logger.info("[通知] Pusher 不可用，报告仅打印到日志")
-            logger.info("\n%s", report)
-            return
+        """发送通知报告（飞书 + 邮件，双通道）。"""
+        sent_any = False
+        today_str = datetime.now(BEIJING_TZ).strftime("%Y-%m-%d")
 
-        if not FEISHU_WEBHOOK_URL:
-            logger.info("[通知] 未配置飞书 Webhook，报告仅打印到日志")
-            logger.info("\n%s", report)
-            return
+        # 飞书通知
+        if self.pusher and FEISHU_WEBHOOK_URL:
+            try:
+                success = self.pusher.send_text(report)
+                if success:
+                    logger.info("[通知] 飞书发送成功")
+                    sent_any = True
+                else:
+                    logger.warning("[通知] 飞书发送失败")
+            except Exception as exc:
+                logger.warning("[通知] 飞书发送异常: %s", exc)
 
+        # 邮件通知
         try:
-            success = self.pusher.send_text(report)
-            if success:
-                logger.info("[通知] 飞书发送成功")
-            else:
-                logger.warning("[通知] 飞书发送失败")
-                logger.info("\n%s", report)
+            from notification.email_sender import EmailSender
+            email = EmailSender()
+            if email.available:
+                success = email.send_daily_report(report, today_str)
+                if success:
+                    logger.info("[通知] 邮件发送成功")
+                    sent_any = True
+                else:
+                    logger.warning("[通知] 邮件发送失败")
         except Exception as exc:
-            logger.warning("[通知] 飞书发送异常: %s", exc)
+            logger.warning("[通知] 邮件模块异常: %s", exc)
+
+        if not sent_any:
+            logger.info("[通知] 无可用通知渠道，报告仅打印到日志")
             logger.info("\n%s", report)
 
 
