@@ -26,8 +26,8 @@ class BacktestEngine:
     A 股回测引擎。
 
     核心规则:
-        - T+1: 买入信号日 T，次交易日 T+1 以开盘价买入
-        - 持有 default_hold_days 个交易日后，在退出日以开盘价卖出
+        - T+1: 信号日当天以开盘价买入，买入当天不能卖出，最早T+1日卖出
+        - 持有 default_hold_days 个交易日后（最少1天），在退出日以开盘价卖出
         - 同时最多持有 max_buy_recommendations 只股票
         - 每日检查止损/止盈，触发时次日开盘卖出
         - 涨跌停（±10%）时不交易
@@ -126,7 +126,7 @@ class BacktestEngine:
             if len(open_positions) >= self.max_positions:
                 continue
 
-            # T+1：在信号日的下一个交易日执行买入
+            # 信号日当天开盘买入（T+1规则：买入当天不能卖出）
             trade = self._execute_trade(sig, price_df, trading_dates)
             if trade is not None:
                 open_positions.append(trade)
@@ -254,7 +254,7 @@ class BacktestEngine:
         """
         根据信号执行一笔交易。
 
-        T+1 规则：信号日 T 的下一个交易日 T+1 以开盘价买入。
+        T+1 规则：信号日当天以开盘价买入，买入当天不能卖出。
 
         Returns:
             交易记录 dict，若无法执行则返回 None
@@ -262,8 +262,8 @@ class BacktestEngine:
         sig_date = signal['_date']
         stock_code = signal['stock_code']
 
-        # 找到信号日的下一个交易日作为买入日
-        entry_date = self._next_trading_date(sig_date, trading_dates)
+        # 信号日当天买入（如果信号日是交易日）
+        entry_date = sig_date if sig_date in trading_dates else self._next_trading_date(sig_date, trading_dates)
         if entry_date is None:
             logger.debug("信号 %s %s 无法找到买入交易日", stock_code, sig_date)
             return None
@@ -305,7 +305,7 @@ class BacktestEngine:
         if entry_idx is None:
             return None
 
-        # 持有期交易日列表（不含买入日，T+1 当天不能卖）
+        # 持有期交易日列表（不含买入日当天，T+1规则：买入当天不能卖出）
         hold_start = entry_idx + 1
         hold_end = min(entry_idx + self.default_hold_days + 1, len(trading_dates))
 
