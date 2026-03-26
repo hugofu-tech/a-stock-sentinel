@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 _SOURCE_REGISTRY = {
     'eastmoney': ('social.eastmoney_guba', 'EastMoneyGuba'),
     'xueqiu': ('social.xueqiu_crawler', 'XueqiuCrawler'),
-    'weibo': ('social.weibo_stock', 'WeiboStockCrawler'),
+    'weibo': ('social.weibo_stock', 'WeiboStock'),
     'shizifengyun': ('social.shizifengyun', 'ShizifengyunCrawler'),
 }
 
