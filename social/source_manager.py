@@ -124,6 +124,12 @@ class SourceManager:
         all_results: Dict[str, Dict[str, List[SocialPost]]] = {}
 
         for name, source in self.sources.items():
+            # 跳过健康检查未通过的数据源
+            if self._health_status.get(name) is False:
+                logger.info(f"[SourceManager] 跳过 {name}（健康检查未通过）")
+                all_results[name] = {}
+                continue
+
             src_config = self.source_configs.get(name, {})
             per_stock = src_config.get('posts_per_stock', limit_per_stock)
 
