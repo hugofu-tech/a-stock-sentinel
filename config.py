@@ -23,7 +23,7 @@ EMAIL_RECEIVERS = os.getenv("EMAIL_RECEIVERS", "").split(",")  # 逗号分隔的
 # LLM配置（Kimi K2.5）
 # ============================================================
 LLM_API_KEY = os.getenv("LLM_API_KEY", "")
-LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://api.moonshot.cn/v1")
+LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://api.kimi.com/coding/v1")
 LLM_MODEL = os.getenv("LLM_MODEL", "kimi-k2.5")
 
 # ============================================================

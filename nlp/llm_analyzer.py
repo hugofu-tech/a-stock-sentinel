@@ -57,9 +57,15 @@ class LLMAnalyzer:
             return
 
         try:
+            import httpx
             self.client = OpenAI(
                 api_key=config.LLM_API_KEY,
                 base_url=config.LLM_BASE_URL,
+                default_headers={"User-Agent": "claude-code/2.1.84"},
+                http_client=httpx.Client(
+                    headers={"User-Agent": "claude-code/2.1.84"},
+                    verify=False,
+                ),
             )
             self.available = True
             logger.info(
