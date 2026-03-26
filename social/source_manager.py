@@ -89,16 +89,18 @@ class SourceManager:
         Returns:
             {source_name: is_healthy}
         """
-        self._health_status = {}
+        now = time.time()
 
         for name, source in self.sources.items():
             try:
                 healthy = source.health_check()
                 self._health_status[name] = healthy
+                self._health_check_time[name] = now
                 status_str = "通过" if healthy else "未通过"
                 logger.info(f"[SourceManager] {name} 健康检查{status_str}")
             except Exception as e:
                 self._health_status[name] = False
+                self._health_check_time[name] = now
                 logger.warning(
                     f"[SourceManager] {name} 健康检查异常: {e}"
                 )
@@ -110,6 +112,59 @@ class SourceManager:
         )
 
         return dict(self._health_status)
+
+    def _recheck_unhealthy_sources(self):
+        """对之前不健康的数据源进行周期性重新检查
+
+        如果距离上次检查超过 _HEALTH_RECHECK_INTERVAL（30分钟），
+        则重新对不健康的数据源执行健康检查，恢复可用的源。
+        """
+        now = time.time()
+        rechecked = []
+
+        for name, source in self.sources.items():
+            # Only re-check sources that are currently unhealthy
+            if self._health_status.get(name, False):
+                continue
+
+            last_check = self._health_check_time.get(name, 0.0)
+            if now - last_check < _HEALTH_RECHECK_INTERVAL:
+                continue
+
+            logger.info(
+                f"[SourceManager] 重新检查不健康数据源: {name} "
+                f"(距上次检查 {int((now - last_check) / 60)} 分钟)"
+            )
+            try:
+                healthy = source.health_check()
+                self._health_status[name] = healthy
+                self._health_check_time[name] = now
+                rechecked.append(name)
+                if healthy:
+                    logger.info(
+                        f"[SourceManager] {name} 已恢复健康!"
+                    )
+                else:
+                    logger.info(
+                        f"[SourceManager] {name} 仍然不健康，"
+                        f"将在 {_HEALTH_RECHECK_INTERVAL // 60} 分钟后再试"
+                    )
+            except Exception as e:
+                self._health_status[name] = False
+                self._health_check_time[name] = now
+                rechecked.append(name)
+                logger.warning(
+                    f"[SourceManager] {name} 重新检查异常: {e}"
+                )
+
+        if rechecked:
+            recovered = [
+                n for n in rechecked if self._health_status.get(n, False)
+            ]
+            if recovered:
+                logger.info(
+                    f"[SourceManager] 恢复的数据源: {recovered}"
+                )
 
     def fetch_all_posts(
         self,
@@ -127,6 +182,10 @@ class SourceManager:
             外层键为数据源名称，内层键为股票代码
         """
         all_results: Dict[str, Dict[str, List[SocialPost]]] = {}
+
+        # Before fetching, re-check any previously unhealthy sources
+        # that haven't been checked in the last 30 minutes.
+        self._recheck_unhealthy_sources()
 
         for name, source in self.sources.items():
             # 跳过健康检查未通过的数据源
