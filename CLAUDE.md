@@ -22,7 +22,7 @@
 - [x] storage/models.py — 数据模型 (SocialPost, SentimentResult, StockSentimentAggregate, StockCandidate, DailyRecommendation)
 - [x] storage/sqlite_store.py — SQLite存储层 (帖子、情绪分数、推荐记录、回测结果)
 - [x] social/base_source.py — 爬虫抽象基类 (rate limit, 重试, UA轮换)
-- [ ] config.py — 扩展配置
+- [x] config.py — 扩展配置（社交源/NLP/邮件/评分权重/交易策略）
 - [x] 验证测试（全部通过）
 
 ### 2026-03-26 Phase 1: 东方财富股吧 + NLP + 回测
@@ -32,7 +32,7 @@
 - [x] backtest/engine.py — 回测引擎（T+1、手续费、止损止盈）
 - [x] backtest/metrics.py — 绩效指标（夏普、回撤、胜率等）
 - [x] 集成测试通过
-- [ ] 股吧实际爬取测试
+- [x] 股吧实际爬取测试（15只股票，300条帖子，HTML嵌入JSON方式）
 - **发现**: SnowNLP对中文股评精度有限，LLM验证层(Phase 5)将弥补
 
 ### 2026-03-26 Phase 2-4: 其余三个社交媒体爬虫
@@ -50,14 +50,18 @@
 - [x] notification/email_sender.py — QQ邮箱通知（Markdown→HTML转换）
 - [x] notification/feishu_sender.py — 飞书通知（Token缓存+Webhook降级）
 - [x] requirements.txt 更新
-- [ ] 端到端集成测试通过（流水线运行中）
+- [x] 端到端集成测试通过（15股→300帖→NLP分析→评分→Top3推荐）
 - [ ] Phase 8 全面回测
 
+### 2026-03-26 修复记录
+- [x] T+1语义修正：信号当天买入，买入当天不能卖出（非信号延迟执行）
+- [x] SourceManager跳过健康检查未通过的数据源，避免无效重试
+
 ### 整体进度
-- Phase 0-7 代码开发完成
-- 东方财富股吧全链路验证通过
-- 雪球/微博/市值风云 待部署腾讯云后启用（沙盒JS限制）
-- 下一步：修复集成测试中的问题，全面回测调优
+- Phase 0-7 代码开发完成，端到端流水线验证通过
+- 东方财富股吧全链路正常（15股×20帖=300条/批次）
+- 雪球/微博/市值风云 代码完成，待部署腾讯云后启用（沙盒JS限制）
+- 下一步：部署腾讯云 → 全面回测调优 → 上线运行
 
 ## 关键决策记录
 1. **为什么SnowNLP+LLM混合**: 10000条文本纯LLM太贵(>$30/天)，SnowNLP<2分钟处理完，LLM仅验证Top10(<$1/天)
