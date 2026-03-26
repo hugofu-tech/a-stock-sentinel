@@ -166,7 +166,7 @@ SENTIMENT_THRESHOLDS = {
 # ============================================================
 TOP_SECTORS_COUNT = 5
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
-LOG_FILE = "logs/sentinel.log"
+LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs", "sentinel.log")
 CACHE_TTL = 300  # 5分钟
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 DB_PATH = os.path.join(DATA_DIR, "sentiment.db")
