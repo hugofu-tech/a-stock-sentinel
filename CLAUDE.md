@@ -57,11 +57,31 @@
 - [x] T+1语义修正：信号当天买入，买入当天不能卖出（非信号延迟执行）
 - [x] SourceManager跳过健康检查未通过的数据源，避免无效重试
 
+### 2026-03-26 腾讯云部署
+- [x] 部署脚本 deploy_tencent.sh（一键部署+crontab定时任务）
+- [x] Kimi K2.5 API 测试通过（endpoint: api.kimi.com/coding/v1）
+- [x] 腾讯云部署成功（49.232.132.165，Ubuntu，北京时区）
+- [x] 全流程测试：夜间管线成功（15股/300帖/0错误）
+- [ ] 全流程测试：晨间管线结果待确认
+- [ ] akshare全A股数据获取验证（当前用默认15只蓝筹测试）
+- **注意**: 测试用的是大市值蓝筹股，正式运行时akshare筛选10-200亿小市值
+
+### 2026-03-26 代码质量优化
+- [x] scheduler.py: run_full_pipeline返回dict格式
+- [x] eastmoney_guba.py: 优先HTML解析，减少无效API重试
+- [x] config.py: python-dotenv自动加载.env + 日志绝对路径
+- [x] deploy_tencent.sh: 移除硬编码密钥
+
+### 2026-03-26 Phase 8 准备
+- [x] backtest/data_collector.py — 历史数据收集器（akshare+缓存）
+- [x] backtest/run_backtest.py — 回测运行脚本（启发式信号+随机基线对比）
+
 ### 整体进度
 - Phase 0-7 代码开发完成，端到端流水线验证通过
 - 东方财富股吧全链路正常（15股×20帖=300条/批次）
 - 雪球/微博/市值风云 代码完成，待部署腾讯云后启用（沙盒JS限制）
-- 下一步：部署腾讯云 → 全面回测调优 → 上线运行
+- 腾讯云部署完成，定时任务已配置（22:00夜间/8:30晨间）
+- 下一步：确认晨间管线结果 → akshare全A股验证 → 全面回测调优
 
 ## 关键决策记录
 1. **为什么SnowNLP+LLM混合**: 10000条文本纯LLM太贵(>$30/天)，SnowNLP<2分钟处理完，LLM仅验证Top10(<$1/天)
@@ -71,5 +91,5 @@
 
 ## 老板待提供信息
 - [ ] QQ邮箱SMTP授权码（Phase 7时需要）
-- [ ] Kimi K2.5 API Key（Phase 5时需要）
-- [ ] 腾讯云服务器（部署阶段时需要）
+- [x] Kimi K2.5 API Key（已提供，Coding Plan Allegretto）
+- [x] 腾讯云服务器（已购买，49.232.132.165）
