@@ -5,6 +5,9 @@
 """
 
 import re
+import time
+import json
+import base64
 import logging
 import urllib.parse
 from datetime import datetime, timedelta
@@ -20,6 +23,9 @@ from storage.models import SocialPost
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 logger = logging.getLogger(__name__)
+
+# Visitor cookie lifetime (20 min; Sina visitor cookies last ~30 min)
+_VISITOR_COOKIE_TTL = 20 * 60
 
 # 用于去除HTML标签的正则
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
@@ -73,10 +79,143 @@ class WeiboStock(BaseSocialSource):
             "Accept": "application/json, text/plain, */*",
             "X-Requested-With": "XMLHttpRequest",
         }))
+        self._visitor_cookie_initialized = False
+        self._visitor_cookie_time: float = 0.0
 
     # ------------------------------------------------------------------
     # Public interface
     # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # Sina Visitor Cookie System
+    # ------------------------------------------------------------------
+
+    def _init_visitor_cookie(self):
+        """通过新浪访客系统获取有效cookie
+
+        Sina visitor system flow:
+        1. POST to passport.weibo.com/visitor/genvisitor with platform info
+           -> returns a tid (visitor ticket ID) in a JSONP callback
+        2. GET passport.weibo.com/visitor/visitor with sub=tid&s=...
+           -> sets SUB/SUBP cookies that grant API access
+
+        This is needed on Tencent Cloud (or any server without browser JS)
+        because m.weibo.cn APIs return empty data without valid cookies.
+        """
+        now = time.time()
+        cookie_expired = (
+            now - self._visitor_cookie_time > _VISITOR_COOKIE_TTL
+        )
+        if self._visitor_cookie_initialized and not cookie_expired:
+            return
+
+        if cookie_expired and self._visitor_cookie_initialized:
+            logger.info("[weibo] 访客cookie已过期，正在刷新...")
+            self.session.cookies.clear()
+
+        try:
+            # Step 1: Generate visitor ticket (tid)
+            gen_url = "https://passport.weibo.com/visitor/genvisitor"
+            gen_data = {
+                "cb": "gen_callback",
+                "fp": '{"os":"1","browser":"Chrome120,0,0,0","fonts":"undefined",'
+                      '"screenInfo":"1920*1080*24","plugins":""}',
+            }
+            gen_headers = {
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Referer": "https://passport.weibo.com/visitor/visitor",
+                "User-Agent": self._get_random_ua(),
+            }
+
+            self._rate_limit()
+            resp = self.session.post(
+                gen_url,
+                data=gen_data,
+                headers=gen_headers,
+                timeout=self.timeout,
+                verify=False,
+            )
+            resp.raise_for_status()
+
+            # Response is JSONP: gen_callback({...})
+            text = resp.text
+            json_match = re.search(r'gen_callback\((.*)\)', text, re.DOTALL)
+            if not json_match:
+                # Try parsing as plain JSON
+                try:
+                    gen_data_resp = json.loads(text)
+                except (json.JSONDecodeError, ValueError):
+                    logger.warning(
+                        "[weibo] genvisitor 返回格式异常，跳过访客初始化"
+                    )
+                    self._visitor_cookie_initialized = True
+                    self._visitor_cookie_time = now
+                    return
+            else:
+                gen_data_resp = json.loads(json_match.group(1))
+
+            tid = gen_data_resp.get("data", {}).get("tid", "")
+            new_tid = gen_data_resp.get("data", {}).get("new_tid", True)
+
+            if not tid:
+                logger.warning("[weibo] genvisitor 未返回tid，跳过访客初始化")
+                self._visitor_cookie_initialized = True
+                self._visitor_cookie_time = now
+                return
+
+            # Step 2: Exchange tid for SUB/SUBP cookies
+            visitor_url = "https://passport.weibo.com/visitor/visitor"
+            visitor_params = {
+                "a": "incarnate",
+                "t": tid,
+                "w": 2 if new_tid else 3,
+                "c": "095",
+                "gc": "",
+                "cb": "cross_domain",
+                "from": "weibo",
+                "_rand": time.time(),
+            }
+            visitor_headers = {
+                "Referer": "https://passport.weibo.com/visitor/visitor",
+                "User-Agent": self._get_random_ua(),
+            }
+
+            self._rate_limit()
+            resp2 = self.session.get(
+                visitor_url,
+                params=visitor_params,
+                headers=visitor_headers,
+                timeout=self.timeout,
+                verify=False,
+            )
+            resp2.raise_for_status()
+
+            # Response is JSONP: cross_domain({...})
+            text2 = resp2.text
+            json_match2 = re.search(
+                r'cross_domain\((.*)\)', text2, re.DOTALL
+            )
+            if json_match2:
+                visitor_data = json.loads(json_match2.group(1))
+                sub = visitor_data.get("data", {}).get("sub", "")
+                subp = visitor_data.get("data", {}).get("subp", "")
+                if sub:
+                    self.session.cookies.set("SUB", sub, domain=".weibo.com")
+                if subp:
+                    self.session.cookies.set("SUBP", subp, domain=".weibo.com")
+                logger.debug(
+                    f"[weibo] 访客cookie设置成功: SUB={bool(sub)}, SUBP={bool(subp)}"
+                )
+
+            self._visitor_cookie_initialized = True
+            self._visitor_cookie_time = now
+            logger.info("[weibo] 访客cookie初始化完成")
+
+        except Exception as e:
+            logger.warning(f"[weibo] 访客cookie初始化失败: {e}，将尝试无cookie访问")
+            # Mark as initialized to avoid retrying every call
+            self._visitor_cookie_initialized = True
+            self._visitor_cookie_time = now
 
     def fetch_stock_posts(self, stock_code: str, stock_name: str = "",
                           limit: int = 30) -> List[SocialPost]:
@@ -89,6 +228,9 @@ class WeiboStock(BaseSocialSource):
         Returns:
             帖子列表
         """
+        # Ensure we have valid visitor cookies before making API calls
+        self._init_visitor_cookie()
+
         # 微博搜索以名称为主；如果没有名称，用股票代码
         query = stock_name if stock_name else stock_code
         posts: List[SocialPost] = []
