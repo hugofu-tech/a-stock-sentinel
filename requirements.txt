@@ -8,3 +8,4 @@ snownlp>=0.12.3
 beautifulsoup4>=4.12.0
 lxml>=5.1.0
 openai>=1.0.0
+python-dotenv>=1.0.0

@@ -3,6 +3,17 @@
 
 import os
 
+# 自动加载 .env 文件（如果存在且 python-dotenv 已安装）
+# 这样即使不通过 deploy 脚本的 `set -a; source .env; set +a` 运行，
+# 环境变量也能被正确加载。
+try:
+    from dotenv import load_dotenv
+    _env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    if os.path.exists(_env_path):
+        load_dotenv(_env_path, override=False)
+except ImportError:
+    pass  # python-dotenv 未安装时静默跳过，依赖 shell 环境变量
+
 # ============================================================
 # 飞书配置（原有）
 # ============================================================

@@ -53,8 +53,8 @@ echo "[6/7] 配置环境变量..."
 ENV_FILE="$PROJECT_DIR/.env"
 if [ ! -f "$ENV_FILE" ]; then
     cat > "$ENV_FILE" << 'ENVEOF'
-# Kimi K2.5 API (Coding Plan)
-LLM_API_KEY=sk-kimi-e54HLtfDf4T0Mei4nxcZt7l14vQMG9QigQPaeL1vmjdyTc5GT3wMXwOqsEaKISGk
+# Kimi K2.5 API (Coding Plan) — 请填入实际密钥
+LLM_API_KEY=
 
 # 飞书配置（如有）
 FEISHU_WEBHOOK_URL=

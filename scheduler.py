@@ -387,17 +387,42 @@ class SentimentScheduler:
 
         return recommendations
 
-    def run_full_pipeline(self) -> List[StockCandidate]:
+    def run_full_pipeline(self) -> Dict:
         """便捷方法：依次执行夜间管线 + 晨间管线。
 
         Returns:
-            晨间管线的推荐列表。
+            字典 {'recommendations': [...], 'report': '...', 'sell_signals': [...]}
         """
         logger.info("[全量管线] 开始 =========================")
-        self.run_nightly_pipeline()
+        nightly_summary = self.run_nightly_pipeline()
         recommendations = self.run_morning_pipeline()
+
+        # 生成卖出信号（从晨间管线的情绪数据重新获取）
+        sell_signals: List[Dict] = []
+        if self.store:
+            now = datetime.now(BEIJING_TZ)
+            today_str = now.strftime("%Y-%m-%d")
+            yesterday_str = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+            sentiment_map: Dict[str, StockSentimentAggregate] = {}
+            for date in (today_str, yesterday_str):
+                aggregates = self.store.get_all_sentiments_for_date(
+                    date, source="combined"
+                )
+                if aggregates:
+                    sentiment_map = {a.stock_code: a for a in aggregates}
+                    break
+            if sentiment_map:
+                sell_signals = self._check_sell_signals(sentiment_map)
+
+        # 始终生成报告（即使推荐和卖出信号都为空）
+        report = self._generate_report(recommendations, sell_signals)
+
         logger.info("[全量管线] 结束 =========================")
-        return recommendations
+        return {
+            "recommendations": recommendations,
+            "report": report,
+            "sell_signals": sell_signals,
+        }
 
     # ==================================================================
     # 内部方法
@@ -689,21 +714,21 @@ class SentimentScheduler:
         lines.append("")
 
         # ---- 买入推荐 ----
+        lines.append("## 买入推荐")
+        lines.append("")
         if recommendations:
-            lines.append("## 买入推荐")
-            lines.append("")
-            medals = ["1.", "2.", "3.", "4.", "5."]
             for i, cand in enumerate(recommendations):
-                medal = medals[i] if i < len(medals) else f"{i + 1}."
                 lines.append(
-                    f"{medal} **{cand.stock_name}({cand.stock_code})** "
-                    f"| {cand.signal}"
+                    f"{i + 1}. **{cand.stock_name}({cand.stock_code})** "
+                    f"| {cand.signal or 'N/A'}"
                 )
-                lines.append(
-                    f"   - 现价 {cand.price:.2f} | "
-                    f"涨幅 {cand.change_pct:+.2f}% | "
-                    f"换手 {cand.turnover_rate:.1f}%"
-                )
+                # 仅在有实际行情数据时显示价格行
+                if cand.price > 0:
+                    lines.append(
+                        f"   - 现价 {cand.price:.2f} | "
+                        f"涨幅 {cand.change_pct:+.2f}% | "
+                        f"换手 {cand.turnover_rate:.1f}%"
+                    )
                 lines.append(
                     f"   - 总分 **{cand.total_score:.1f}** "
                     f"(技术={cand.technical_score:.0f} "
@@ -711,19 +736,18 @@ class SentimentScheduler:
                     f"情绪={cand.sentiment_score:.0f} "
                     f"风险={cand.risk_adjustment:.0f})"
                 )
-                lines.append(
-                    f"   - 建议持有 {cand.suggested_hold_days} 天 | "
-                    f"止损 {cand.stop_loss_pct}% | "
-                    f"止盈 {cand.take_profit_pct}%"
-                )
+                if cand.suggested_hold_days > 0:
+                    lines.append(
+                        f"   - 建议持有 {cand.suggested_hold_days} 天 | "
+                        f"止损 {cand.stop_loss_pct}% | "
+                        f"止盈 {cand.take_profit_pct}%"
+                    )
                 if cand.reason:
                     lines.append(f"   - {cand.reason}")
                 if cand.llm_summary:
                     lines.append(f"   - LLM: {cand.llm_summary}")
                 lines.append("")
         else:
-            lines.append("## 买入推荐")
-            lines.append("")
             lines.append("今日无符合条件的买入推荐。")
             lines.append("")
 

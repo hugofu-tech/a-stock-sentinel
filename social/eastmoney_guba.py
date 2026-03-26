@@ -67,6 +67,9 @@ class EastMoneyGuba(BaseSocialSource):
                           limit: int = 30) -> List[SocialPost]:
         """获取指定股票的股吧帖子
 
+        策略：优先使用HTML嵌入JSON方式（更可靠），API作为备用。
+        东方财富API经常返回HTML而非JSON，HTML方式成功率更高。
+
         Args:
             stock_code: 股票代码（纯数字，如 '600519'）
             stock_name: 股票名称（可选）
@@ -76,24 +79,22 @@ class EastMoneyGuba(BaseSocialSource):
         """
         posts: List[SocialPost] = []
 
-        # 优先尝试API方式
+        # 优先使用HTML嵌入JSON方式（成功率更高）
         try:
             posts = self._retry_request(
-                self._fetch_via_api, stock_code, stock_name, limit
+                self._fetch_via_html, stock_code, stock_name, limit
             )
         except Exception as e:
             logger.warning(
-                f"[eastmoney] API方式获取 {stock_code} 失败: {e}，尝试HTML解析"
+                f"[eastmoney] HTML方式获取 {stock_code} 失败: {e}，尝试API"
             )
 
-        # 如果API方式失败或结果为空，使用HTML解析作为备用
+        # HTML方式失败时，尝试API作为备用（仅1次，不重试）
         if not posts:
             try:
-                posts = self._retry_request(
-                    self._fetch_via_html, stock_code, stock_name, limit
-                )
+                posts = self._fetch_via_api(stock_code, stock_name, limit)
             except Exception as e:
-                logger.error(f"[eastmoney] HTML方式获取 {stock_code} 也失败: {e}")
+                logger.error(f"[eastmoney] API方式获取 {stock_code} 也失败: {e}")
                 return []
 
         logger.info(
