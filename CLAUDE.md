@@ -35,6 +35,16 @@
 - [ ] 股吧实际爬取测试
 - **发现**: SnowNLP对中文股评精度有限，LLM验证层(Phase 5)将弥补
 
+### 2026-03-26 Phase 2-4: 其余三个社交媒体爬虫
+- [x] social/xueqiu_crawler.py — 雪球评论爬虫（Cookie session+双API+大V加权）
+- [x] social/weibo_stock.py — 微博股票爬虫（移动端API+四重噪声过滤）
+- [x] social/shizifengyun.py — 市值风云文章爬虫（三级降级策略）
+- [x] social/source_manager.py — 多源编排器（动态导入+健康检查+降级容错）
+- **沙盒环境限制**: 雪球(阿里云WAF需JS)、微博(Sina Visitor需JS)、市值风云(代理封锁)
+  - 东方财富正常工作
+  - 其余三个代码已完成，待部署腾讯云后启用
+- [ ] Phase 5-7 开发中（并行子代理）
+
 ## 关键决策记录
 1. **为什么SnowNLP+LLM混合**: 10000条文本纯LLM太贵(>$30/天)，SnowNLP<2分钟处理完，LLM仅验证Top10(<$1/天)
 2. **为什么情绪权重40%**: 项目核心是情绪选股，文献支持情绪因子显著超额收益(171% vs 73% benchmark)
