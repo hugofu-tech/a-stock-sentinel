@@ -431,12 +431,16 @@ class SentimentScheduler:
     def _get_stock_universe(self) -> List[Dict]:
         """获取过滤后的股票池。
 
-        优先使用 akshare 实时行情；不可用时回退到默认列表。
+        降级策略（按优先级）:
+            1. akshare ``stock_zh_a_spot_em()``
+            2. 腾讯财经 API (qt.gtimg.cn)
+            3. baostock
+            4. 默认股票列表
 
         Returns:
             [{"code": "600519", "name": "贵州茅台"}, ...]
         """
-        # 尝试 akshare
+        # --- 1. 尝试 akshare ---
         try:
             import akshare as ak
 
@@ -459,14 +463,39 @@ class SentimentScheduler:
 
             logger.warning("[StockUniverse] akshare 返回数据为空或筛选后为空")
         except ImportError:
-            logger.info("[StockUniverse] akshare 未安装，使用默认列表")
+            logger.info("[StockUniverse] akshare 未安装")
         except Exception as exc:
             logger.warning("[StockUniverse] akshare 调用失败: %s", exc)
 
-        # 尝试 baostock 备选
+        # --- 2. 尝试腾讯财经 API ---
+        try:
+            from data.tencent_api import get_stock_universe as tencent_universe
+
+            logger.info("[StockUniverse] akshare不可用，尝试腾讯财经 API...")
+            df = tencent_universe()
+
+            if df is not None and not df.empty and self.stock_scorer:
+                filtered = self.stock_scorer.filter_universe(df)
+                if not filtered.empty:
+                    stocks = []
+                    for _, row in filtered.iterrows():
+                        stocks.append({
+                            "code": str(row.get("代码", "")),
+                            "name": str(row.get("名称", "")),
+                        })
+                    logger.info(
+                        "[StockUniverse] 腾讯API: %d 只股票通过筛选", len(stocks)
+                    )
+                    return stocks
+
+            logger.warning("[StockUniverse] 腾讯API 返回数据为空或筛选后为空")
+        except Exception as exc:
+            logger.warning("[StockUniverse] 腾讯API 也失败: %s", exc)
+
+        # --- 3. 尝试 baostock 备选 ---
         try:
             import baostock as bs
-            logger.info("[StockUniverse] akshare不可用，尝试 baostock...")
+            logger.info("[StockUniverse] 尝试 baostock...")
             bs.login()
             rs = bs.query_stock_basic(code_name="", code="")
             stocks_data = []
@@ -486,7 +515,7 @@ class SentimentScheduler:
         except Exception as exc:
             logger.warning("[StockUniverse] baostock 也失败: %s", exc)
 
-        # 最终回退
+        # --- 4. 最终回退 ---
         logger.info(
             "[StockUniverse] 使用默认股票列表 (%d 只)", len(_DEFAULT_STOCKS)
         )
@@ -606,7 +635,7 @@ class SentimentScheduler:
         """
         candidates: List[StockCandidate] = []
 
-        # 尝试获取实时行情
+        # 尝试获取实时行情（akshare -> 腾讯API -> 放弃）
         realtime_df = None
         try:
             import akshare as ak
@@ -615,12 +644,32 @@ class SentimentScheduler:
                 realtime_df["代码"] = realtime_df["代码"].astype(str)
                 realtime_df = realtime_df.set_index("代码")
                 logger.info(
-                    "[评分] 获取实时行情: %d 只", len(realtime_df)
+                    "[评分] akshare 获取实时行情: %d 只", len(realtime_df)
                 )
         except ImportError:
-            logger.info("[评分] akshare 未安装，使用简化评分")
+            logger.info("[评分] akshare 未安装")
         except Exception as exc:
-            logger.warning("[评分] 获取实时行情失败: %s", exc)
+            logger.warning("[评分] akshare 获取实时行情失败: %s", exc)
+
+        # akshare 失败时尝试腾讯 API
+        if realtime_df is None or realtime_df.empty:
+            try:
+                from data.tencent_api import fetch_realtime_quotes
+                stock_codes = list(sentiment_map.keys())
+                if stock_codes:
+                    tencent_df = fetch_realtime_quotes(stock_codes)
+                    if tencent_df is not None and not tencent_df.empty:
+                        tencent_df["代码"] = tencent_df["代码"].astype(str)
+                        realtime_df = tencent_df.set_index("代码")
+                        logger.info(
+                            "[评分] 腾讯API 获取实时行情: %d 只",
+                            len(realtime_df),
+                        )
+            except Exception as exc:
+                logger.warning("[评分] 腾讯API 获取实时行情也失败: %s", exc)
+
+        if realtime_df is None or (hasattr(realtime_df, 'empty') and realtime_df.empty):
+            logger.info("[评分] 无实时行情数据，使用简化评分")
 
         # 评分
         for stock_code, agg in sentiment_map.items():
