@@ -469,7 +469,7 @@ class SentimentScheduler:
 
         # --- 2. 尝试腾讯财经 API ---
         try:
-            from data.tencent_api import get_stock_universe as tencent_universe
+            from social.tencent_api import get_stock_universe as tencent_universe
 
             logger.info("[StockUniverse] akshare不可用，尝试腾讯财经 API...")
             df = tencent_universe()
@@ -654,7 +654,7 @@ class SentimentScheduler:
         # akshare 失败时尝试腾讯 API
         if realtime_df is None or realtime_df.empty:
             try:
-                from data.tencent_api import fetch_realtime_quotes
+                from social.tencent_api import fetch_realtime_quotes
                 stock_codes = list(sentiment_map.keys())
                 if stock_codes:
                     tencent_df = fetch_realtime_quotes(stock_codes)

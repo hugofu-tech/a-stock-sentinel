@@ -22,8 +22,8 @@ class EastMoneyGuba(BaseSocialSource):
     """东方财富股吧数据源
 
     采集策略：
-    1. 优先使用股吧帖子列表API（返回JSON，结构化程度高）
-    2. 备用方案：解析股吧HTML页面
+    1. 优先使用HTML页面中嵌入的JSON数据（var article_list，成功率更高）
+    2. 备用方案：股吧帖子列表API（仅尝试1次，不重试）
     """
 
     # 股吧API基础URL
