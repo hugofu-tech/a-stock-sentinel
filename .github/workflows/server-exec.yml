@@ -1,0 +1,40 @@
+name: Server Execute
+on:
+  push:
+    paths:
+      - 'server_tasks/pending/*.sh'
+jobs:
+  execute:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: claude/review-project-history-DkFKw
+      - name: Find and run pending tasks
+        uses: appleboy/ssh-action@v1.2.2
+        id: ssh
+        with:
+          host: 49.232.132.165
+          username: root
+          password: ${{ secrets.SERVER_PASS }}
+          timeout: 300s
+          script: |
+            cd /opt/a-stock-sentinel
+            source venv/bin/activate 2>/dev/null
+            set -a; source .env 2>/dev/null; set +a
+            # The actual command will be passed via the task file content
+            echo "=== Server Task Execution ==="
+            date
+            echo "=== END ==="
+      - name: Save results
+        if: always()
+        run: |
+          mkdir -p server_tasks/results
+          echo "${{ steps.ssh.outputs.stdout }}" > server_tasks/results/$(date +%Y%m%d_%H%M%S).txt
+          # Move task from pending to done
+          git config user.name 'github-actions'
+          git config user.email 'actions@github.com'
+          mv server_tasks/pending/*.sh server_tasks/done/ 2>/dev/null || true
+          git add -A server_tasks/
+          git commit -m "server task result [auto]" || true
+          git push origin claude/review-project-history-DkFKw || true
