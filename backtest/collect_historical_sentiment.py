@@ -66,6 +66,7 @@ REQUEST_INTERVAL = 2.5        # seconds between requests
 REQUEST_TIMEOUT = 20          # seconds
 SENTIMENT_CSV = os.path.join(_PROJECT_ROOT, "backtest", "historical_sentiment.csv")
 PRICE_CSV = os.path.join(_PROJECT_ROOT, "backtest", "historical_data.csv")
+POSTS_CACHE_CSV = os.path.join(_PROJECT_ROOT, "backtest", "crawled_posts.csv")
 
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -77,6 +78,96 @@ USER_AGENTS = [
 
 LIST_URL = "https://guba.eastmoney.com/list,{code}.html"
 LIST_URL_PAGED = "https://guba.eastmoney.com/list,{code},f_{page}.html"
+
+# East Money kline API for price data
+KLINE_API = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
+
+
+# ======================================================================
+# Step 0: Fetch price data from East Money API
+# ======================================================================
+
+def get_secid(stock_code: str) -> str:
+    """Generate East Money secid format."""
+    if stock_code.startswith("6"):
+        return f"1.{stock_code}"
+    return f"0.{stock_code}"
+
+
+def fetch_price_data_eastmoney(stock_code: str, start_date: str, end_date: str,
+                                session: requests.Session) -> Optional[pd.DataFrame]:
+    """Fetch daily kline data from East Money push API."""
+    secid = get_secid(stock_code)
+    params = {
+        "secid": secid,
+        "fields1": "f1,f2,f3,f4,f5,f6",
+        "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61",
+        "klt": "101",  # daily
+        "fqt": "1",    # qfq (forward adjusted)
+        "beg": start_date.replace("-", ""),
+        "end": end_date.replace("-", ""),
+        "lmt": "500",
+        "ut": "fa5fd1943c7b386f172d6893dbfba10b",
+    }
+
+    try:
+        time.sleep(0.5)
+        resp = session.get(KLINE_API, params=params, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        logger.warning(f"Failed to fetch price for {stock_code}: {e}")
+        return None
+
+    klines = data.get("data", {}).get("klines", [])
+    if not klines:
+        logger.warning(f"No kline data for {stock_code}")
+        return None
+
+    rows = []
+    for line in klines:
+        parts = line.split(",")
+        if len(parts) >= 7:
+            rows.append({
+                "date": parts[0],
+                "stock_code": stock_code,
+                "open": float(parts[1]),
+                "close": float(parts[2]),
+                "high": float(parts[3]),
+                "low": float(parts[4]),
+                "volume": float(parts[5]),
+            })
+
+    df = pd.DataFrame(rows)
+    df["date"] = pd.to_datetime(df["date"])
+    return df
+
+
+def fetch_all_price_data(stock_codes: List[str], start_date: str,
+                          end_date: str) -> pd.DataFrame:
+    """Fetch price data for all stocks from East Money API."""
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": random.choice(USER_AGENTS),
+        "Referer": "https://quote.eastmoney.com/",
+    })
+
+    frames = []
+    for i, code in enumerate(stock_codes, 1):
+        logger.info(f"  Fetching price data {code} ({i}/{len(stock_codes)})")
+        df = fetch_price_data_eastmoney(code, start_date, end_date, session)
+        if df is not None and not df.empty:
+            frames.append(df)
+
+    session.close()
+
+    if not frames:
+        return pd.DataFrame(columns=["date", "stock_code", "open", "high",
+                                      "low", "close", "volume"])
+
+    result = pd.concat(frames, ignore_index=True)
+    result = result.sort_values(["stock_code", "date"]).reset_index(drop=True)
+    return result
 
 
 # ======================================================================
@@ -528,11 +619,12 @@ def run_backtest_with_signals(signals: List[dict], price_data: pd.DataFrame,
         print(f"    {'Stock':>10s}  {'Entry':>12s}  {'Exit':>12s}  {'Return%':>8s}  {'Reason':>12s}")
         print(f"    {'-'*54}")
         for t in trades[-5:]:
-            print(f"    {t.get('stock_code',''):>10s}  "
+            sc = str(t.get('stock_code', '')).zfill(6)
+            print(f"    {sc:>10s}  "
                   f"{str(t.get('entry_date',''))[:10]:>12s}  "
                   f"{str(t.get('exit_date',''))[:10]:>12s}  "
                   f"{t.get('return_pct',0):>+8.2f}  "
-                  f"{t.get('exit_reason',''):>12s}")
+                  f"{str(t.get('exit_reason','')):>12s}")
 
     return result
 
@@ -554,7 +646,35 @@ def main():
     print("  PHASE 1: Crawling historical posts from East Money Guba")
     print("=" * 70)
 
-    all_posts = crawl_all_stocks()
+    # Check for cached posts first
+    if os.path.exists(POSTS_CACHE_CSV):
+        logger.info(f"Loading cached posts from {POSTS_CACHE_CSV}")
+        cached_df = pd.read_csv(POSTS_CACHE_CSV)
+        all_posts = []
+        for _, row in cached_df.iterrows():
+            all_posts.append({
+                "stock_code": str(row["stock_code"]).zfill(6),
+                "stock_name": row["stock_name"],
+                "title": row["title"],
+                "publish_time": datetime.strptime(str(row["publish_time"])[:19], "%Y-%m-%d %H:%M:%S"),
+                "date": row["date"],
+            })
+        logger.info(f"Loaded {len(all_posts)} cached posts")
+    else:
+        all_posts = crawl_all_stocks()
+        # Save cache
+        if all_posts:
+            cache_rows = []
+            for p in all_posts:
+                cache_rows.append({
+                    "stock_code": p["stock_code"],
+                    "stock_name": p["stock_name"],
+                    "title": p["title"],
+                    "publish_time": p["publish_time"].strftime("%Y-%m-%d %H:%M:%S"),
+                    "date": p["date"],
+                })
+            pd.DataFrame(cache_rows).to_csv(POSTS_CACHE_CSV, index=False)
+            logger.info(f"Posts cached to {POSTS_CACHE_CSV}")
 
     if not all_posts:
         print("[ERROR] No posts crawled. Cannot proceed.")
@@ -613,38 +733,68 @@ def main():
     print(sentiment_df.head(10).to_string(index=False))
 
     # ------------------------------------------------------------------
-    # Phase 4: Load price data
+    # Phase 4: Fetch price data covering sentiment period
     # ------------------------------------------------------------------
     print("\n" + "=" * 70)
-    print("  PHASE 4: Loading Historical Price Data")
+    print("  PHASE 4: Fetching Price Data (East Money API)")
     print("=" * 70)
 
-    if not os.path.exists(PRICE_CSV):
-        print(f"[ERROR] Price data not found at {PRICE_CSV}")
-        print("  Please run: python -m backtest.run_backtest first to generate it")
-        sys.exit(1)
+    # Determine what date range we need: sentiment dates + buffer
+    sentiment_dates_sorted = sorted(sentiment_df["date"].unique())
+    # Start 30 days before earliest sentiment date (for MA warmup)
+    from datetime import datetime as dt_cls
+    earliest_sentiment = dt_cls.strptime(sentiment_dates_sorted[0], "%Y-%m-%d")
+    latest_sentiment = dt_cls.strptime(sentiment_dates_sorted[-1], "%Y-%m-%d")
+    price_start = (earliest_sentiment - timedelta(days=45)).strftime("%Y-%m-%d")
+    price_end = (latest_sentiment + timedelta(days=10)).strftime("%Y-%m-%d")
 
-    price_data = pd.read_csv(PRICE_CSV)
-    price_data["date"] = pd.to_datetime(price_data["date"])
+    PRICE_CACHE = os.path.join(_PROJECT_ROOT, "backtest", "eastmoney_price_cache.csv")
+
+    if os.path.exists(PRICE_CACHE):
+        logger.info(f"Loading cached price data from {PRICE_CACHE}")
+        price_data = pd.read_csv(PRICE_CACHE)
+        price_data["date"] = pd.to_datetime(price_data["date"])
+    else:
+        stock_codes = [s["code"] for s in STOCKS]
+        print(f"  Fetching price data for {len(stock_codes)} stocks: {price_start} ~ {price_end}")
+        price_data = fetch_all_price_data(stock_codes, price_start, price_end)
+        if not price_data.empty:
+            price_data.to_csv(PRICE_CACHE, index=False)
+            logger.info(f"Price data cached to {PRICE_CACHE}")
+
+    # Also load the existing historical_data.csv and merge if available
+    if os.path.exists(PRICE_CSV):
+        old_price = pd.read_csv(PRICE_CSV)
+        old_price["date"] = pd.to_datetime(old_price["date"])
+        old_price["stock_code"] = old_price["stock_code"].astype(str).str.zfill(6)
+        if not price_data.empty:
+            price_data["stock_code"] = price_data["stock_code"].astype(str).str.zfill(6)
+            price_data = pd.concat([old_price, price_data], ignore_index=True)
+            price_data = price_data.drop_duplicates(subset=["date", "stock_code"],
+                                                     keep="last")
+        else:
+            price_data = old_price
+
+    price_data = price_data.sort_values(["stock_code", "date"]).reset_index(drop=True)
+
     print(f"  Price records: {len(price_data)}")
     print(f"  Stocks: {price_data['stock_code'].nunique()}")
     price_dates = price_data["date"].dt.strftime("%Y-%m-%d")
     print(f"  Date range: {price_dates.min()} ~ {price_dates.max()}")
 
-    # Determine backtest range from overlap of sentiment dates and price dates
+    # Determine backtest range from overlap
     sentiment_dates = set(sentiment_df["date"].unique())
     price_date_set = set(price_dates.unique())
     overlap_dates = sorted(sentiment_dates & price_date_set)
 
     if not overlap_dates:
-        print("\n[ERROR] No overlapping dates between sentiment and price data!")
-        print(f"  Sentiment dates: {sorted(sentiment_dates)[:5]} ... {sorted(sentiment_dates)[-5:]}")
+        print("\n[WARN] No exact date overlap between sentiment and price data.")
+        print(f"  Sentiment dates: {sentiment_dates_sorted[:5]} ... {sentiment_dates_sorted[-5:]}")
         print(f"  Price dates: {sorted(price_date_set)[:5]} ... {sorted(price_date_set)[-5:]}")
-        # Even if no overlap, we can still run sentiment signals against price data
-        # by using sentiment dates that are close to price dates
-        print("\n  Attempting to use sentiment signals with nearest price dates...")
-        start_date = sorted(price_date_set)[0]
-        end_date = sorted(price_date_set)[-1]
+        # Use the full price range that covers the sentiment period
+        start_date = sentiment_dates_sorted[0]
+        end_date = sentiment_dates_sorted[-1]
+        print(f"\n  Using sentiment date range for backtest: {start_date} ~ {end_date}")
     else:
         start_date = overlap_dates[0]
         end_date = overlap_dates[-1]
