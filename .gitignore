@@ -3,3 +3,7 @@ __pycache__/
 .DS_Store
 logs/*.log
 .env
+
+# Trump Sentinel data
+data/seen_posts.json
+data/signals_*.json
