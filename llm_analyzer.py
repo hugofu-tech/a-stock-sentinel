@@ -158,43 +158,69 @@ class LLMAnalyzer:
         return results
 
     def _fallback_analysis(self, post):
-        """Rule-based fallback when LLM is unavailable."""
+        """基于规则的降级分析（当LLM不可用时）。"""
         content = post.get('content', '').lower()
 
-        # Simple keyword-based heuristics
-        high_impact_keywords = {
-            'tariffs_trade': ['tariff', 'trade', 'china', 'import', 'export', 'duty', 'wto'],
-            'crypto_digital': ['bitcoin', 'crypto', 'btc', 'digital currency', 'cbdc'],
-            'foreign_policy': ['russia', 'ukraine', 'nato', 'sanctions', 'war', 'peace'],
-            'election_politics': ['election', 'vote', 'ballot', 'campaign', 'debate'],
-            'economy_fiscal': ['tax', 'fed', 'interest rate', 'inflation', 'debt'],
-            'regulation_policy': ['executive order', 'regulation', 'ban', 'order'],
-            'personnel': ['fired', 'appointed', 'hired', 'cabinet', 'secretary'],
-            'legal_judicial': ['court', 'judge', 'trial', 'pardon', 'indictment'],
+        # 主题关键词映射
+        topic_keywords = {
+            'tariffs_trade': ['tariff', 'trade', 'china', 'import', 'export', 'duty', 'wto', 'trade deal', 'trade war'],
+            'crypto_digital': ['bitcoin', 'crypto', 'btc', 'digital currency', 'cbdc', 'blockchain', 'reserve'],
+            'foreign_policy': ['russia', 'ukraine', 'nato', 'sanctions', 'war', 'peace', 'iran', 'north korea', 'israel', 'gaza'],
+            'election_politics': ['election', 'vote', 'ballot', 'campaign', 'debate', 'nominee', 'running mate'],
+            'economy_fiscal': ['tax', 'fed', 'interest rate', 'inflation', 'debt', 'deficit', 'spending', 'gdp'],
+            'regulation_policy': ['executive order', 'regulation', 'ban', 'signing', 'signed'],
+            'personnel': ['fired', 'appointed', 'hired', 'cabinet', 'secretary', 'resign', 'replaced', 'nomination'],
+            'legal_judicial': ['court', 'judge', 'trial', 'pardon', 'indictment', 'supreme court', 'ruling'],
+            'military_defense': ['military', 'troops', 'deploy', 'strike', 'missile', 'defense'],
+            'tech_social_media': ['tiktok', 'big tech', 'facebook', 'google', 'section 230', 'ai'],
         }
+
+        # 高影响力动作词（表示实际行动而非闲聊）
+        action_words = [
+            'announcing', 'signed', 'signing', 'effective immediately',
+            'executive order', 'i am', 'we will', 'i will', 'just signed',
+            'breaking', 'big news', 'historic', 'fired', 'appointed',
+        ]
 
         detected_topic = 'unknown'
         max_matches = 0
         matched_keywords = []
+        all_matched = []
 
-        for topic, keywords in high_impact_keywords.items():
+        for topic, keywords in topic_keywords.items():
             matches = [kw for kw in keywords if kw in content]
             if len(matches) > max_matches:
                 max_matches = len(matches)
                 detected_topic = topic
                 matched_keywords = matches
+            all_matched.extend(matches)
 
-        impact = min(10, max_matches * 3) if max_matches > 0 else 2
+        # 动作词加分（表示真正的政策行动）
+        action_bonus = sum(1 for aw in action_words if aw in content)
+
+        # 影响力评分
+        impact = min(10, max_matches * 2 + action_bonus * 2) if max_matches > 0 else 2
+
+        # 置信度：关键词数量 + 动作词加分
+        confidence = min(75, max_matches * 20 + action_bonus * 15)
+
+        # Polymarket搜索关键词优化：加上"trump"前缀
+        search_keywords = ['trump'] + matched_keywords[:4]
+
+        # 方向推断
+        direction = 'YES'
+        if any(w in content for w in ['ban', 'stop', 'end', 'cancel', 'terminate', 'withdraw']):
+            direction = 'NO'  # 否定性行动
 
         return {
             'topic_category': detected_topic,
             'market_impact_score': impact,
-            'impact_reasoning': f"Keyword match: {', '.join(matched_keywords) or 'none'}",
-            'polymarket_keywords': matched_keywords[:5] if matched_keywords else ['trump'],
-            'suggested_direction': 'YES',
-            'direction_target': 'unknown',
-            'confidence': min(40, max_matches * 15),
-            'urgency': 'watch' if impact >= 5 else 'low',
+            'impact_reasoning': f"关键词匹配: {', '.join(all_matched) or '无'}; 动作词: {action_bonus}个",
+            'polymarket_keywords': search_keywords,
+            'suggested_direction': direction,
+            'direction_target': detected_topic,
+            'confidence': confidence,
+            'urgency': 'immediate' if impact >= 7 else ('watch' if impact >= 5 else 'low'),
             'is_actionable': impact >= 5,
             'post_id': post.get('id'),
             'post_source': post.get('source'),

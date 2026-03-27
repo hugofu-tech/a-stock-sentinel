@@ -1,17 +1,16 @@
 """
-Polymarket Client
-Fetches market data from Polymarket's Gamma API.
+Polymarket客户端
+通过Gamma API获取预测市场数据。
 
-Phase 1: Read-only market search and price fetching.
-Phase 2: Order placement via CLOB API (py-clob-client).
+第一阶段：只读，搜索市场和获取价格。
+第二阶段：通过CLOB API下单（py-clob-client）。
 
-Polymarket Gamma API docs: https://gamma-api.polymarket.com
-Markets are prediction markets with YES/NO outcomes.
-Prices range from $0.01 to $0.99 representing probability.
+API地址：https://gamma-api.polymarket.com
+市场为YES/NO二元预测市场，价格范围$0.01-$0.99代表概率。
 """
 
+import json
 import logging
-from urllib.parse import quote
 
 import requests
 
@@ -20,10 +19,14 @@ from trump_config import POLYMARKET_GAMMA_API
 logger = logging.getLogger(__name__)
 
 REQUEST_TIMEOUT = 15
+# 每次API请求最大条数
+PAGE_SIZE = 100
+# 搜索市场时最多拉取的页数
+MAX_PAGES = 5
 
 
 class PolymarketClient:
-    """Client for Polymarket Gamma API (market data)."""
+    """Polymarket Gamma API客户端。"""
 
     def __init__(self):
         self.base_url = POLYMARKET_GAMMA_API
@@ -32,169 +35,229 @@ class PolymarketClient:
             'Accept': 'application/json',
             'User-Agent': 'TrumpSentinel/1.0',
         })
+        # 缓存，避免重复请求
+        self._market_cache = []
+        self._event_cache = []
 
     def search_markets(self, keywords, limit=10, active_only=True):
-        """Search Polymarket for markets matching keywords.
+        """搜索Polymarket匹配关键词的市场。
+
+        策略：
+        1. 先尝试从events端点搜索（包含更多结构化数据）
+        2. 再从markets端点分页拉取并过滤
+        3. 合并去重后按相关度+成交量排序
 
         Args:
-            keywords: List of search terms or a single string.
-            limit: Max markets to return.
-            active_only: Only return active/open markets.
+            keywords: 搜索词列表或单个字符串。
+            limit: 返回的最大市场数。
+            active_only: 是否只返回活跃市场。
 
         Returns:
-            List of market dicts with key fields normalized.
+            标准化的市场字典列表。
         """
         if isinstance(keywords, list):
             query = " ".join(keywords)
         else:
             query = keywords
 
+        query_terms = query.lower().split()
+
         try:
-            url = f"{self.base_url}/markets"
-            params = {
-                'limit': limit,
-                'active': str(active_only).lower(),
-                'closed': 'false',
-            }
+            # 1. 从events搜索（events包含子市场，覆盖面更广）
+            event_markets = self._search_via_events(query_terms)
 
-            # Use text_query for search if the API supports it
-            # The Gamma API uses a query parameter for full-text search
-            params['limit'] = limit
+            # 2. 从markets端点分页搜索
+            direct_markets = self._search_via_markets(query_terms, active_only)
 
-            resp = self.session.get(url, params=params, timeout=REQUEST_TIMEOUT)
+            # 3. 合并去重
+            seen_ids = set()
+            all_matched = []
 
-            if resp.status_code != 200:
-                logger.warning(f"Polymarket API returned {resp.status_code}")
-                return []
+            for m in event_markets + direct_markets:
+                mid = m.get('id') or m.get('slug')
+                if mid and mid not in seen_ids:
+                    seen_ids.add(mid)
+                    all_matched.append(m)
 
-            all_markets = resp.json()
+            # 4. 按相关度+成交量排序
+            all_matched.sort(key=lambda m: (
+                -float(m.get('_relevance_score', 0)),
+                -float(m.get('volume', 0) or 0)
+            ))
 
-            # Filter by keyword relevance (client-side filtering)
-            query_lower = query.lower()
-            query_terms = query_lower.split()
+            results = [self._normalize_market(m) if not m.get('_normalized') else m
+                        for m in all_matched[:limit]]
 
-            matched = []
+            logger.info(f"Polymarket搜索 '{query}': 找到 {len(results)} 个市场 "
+                        f"(events: {len(event_markets)}, markets: {len(direct_markets)})")
+            return results
+
+        except Exception as e:
+            logger.error(f"Polymarket搜索失败: {e}")
+            return []
+
+    def _search_via_events(self, query_terms):
+        """通过events端点搜索，提取子市场。"""
+        matched_markets = []
+
+        try:
+            # 拉取活跃事件
+            events = self._fetch_events()
+
+            for event in events:
+                title = (event.get('title', '') or '').lower()
+                desc = (event.get('description', '') or '').lower()
+                searchable = title + ' ' + desc
+
+                event_score = sum(1 for t in query_terms if t in searchable)
+                if event_score == 0:
+                    continue
+
+                # 从事件中提取子市场
+                for market in event.get('markets', []):
+                    q = (market.get('question', '') or '').lower()
+                    d = (market.get('description', '') or '').lower()
+                    market_text = q + ' ' + d
+
+                    market_score = sum(1 for t in query_terms if t in market_text)
+                    # 事件匹配的市场也算相关
+                    total_score = max(event_score, market_score) + min(event_score, market_score) * 0.5
+
+                    if total_score > 0:
+                        market['_relevance_score'] = total_score
+                        matched_markets.append(market)
+
+        except Exception as e:
+            logger.error(f"Events搜索失败: {e}")
+
+        return matched_markets
+
+    def _search_via_markets(self, query_terms, active_only):
+        """通过markets端点分页搜索。"""
+        matched = []
+
+        try:
+            all_markets = self._fetch_markets(active_only)
+
             for market in all_markets:
                 question = (market.get('question', '') or '').lower()
                 description = (market.get('description', '') or '').lower()
                 searchable = question + ' ' + description
 
-                # Score by number of matching terms
                 score = sum(1 for term in query_terms if term in searchable)
                 if score > 0:
                     market['_relevance_score'] = score
                     matched.append(market)
 
-            # Sort by relevance then by volume
-            matched.sort(key=lambda m: (
-                -m.get('_relevance_score', 0),
-                -float(m.get('volume', 0) or 0)
-            ))
-
-            results = [self._normalize_market(m) for m in matched[:limit]]
-            logger.info(f"Polymarket search '{query}': found {len(results)} markets")
-            return results
-
         except Exception as e:
-            logger.error(f"Polymarket search failed: {e}")
-            return []
+            logger.error(f"Markets搜索失败: {e}")
 
-    def search_events(self, keywords, limit=5):
-        """Search Polymarket events (which contain multiple markets).
+        return matched
 
-        Args:
-            keywords: Search terms.
-            limit: Max events to return.
+    def _fetch_events(self):
+        """拉取所有活跃事件（带缓存）。"""
+        if self._event_cache:
+            return self._event_cache
 
-        Returns:
-            List of event dicts.
-        """
-        if isinstance(keywords, list):
-            query = " ".join(keywords)
-        else:
-            query = keywords
+        all_events = []
+        offset = 0
 
-        try:
-            url = f"{self.base_url}/events"
-            params = {
-                'limit': 50,
-                'active': 'true',
-                'closed': 'false',
-            }
+        for _ in range(MAX_PAGES):
+            try:
+                resp = self.session.get(
+                    f"{self.base_url}/events",
+                    params={
+                        'limit': PAGE_SIZE,
+                        'active': 'true',
+                        'closed': 'false',
+                        'offset': offset,
+                    },
+                    timeout=REQUEST_TIMEOUT
+                )
+                if resp.status_code != 200:
+                    break
 
-            resp = self.session.get(url, params=params, timeout=REQUEST_TIMEOUT)
+                batch = resp.json()
+                if not batch:
+                    break
 
-            if resp.status_code != 200:
-                logger.warning(f"Polymarket events API returned {resp.status_code}")
-                return []
+                all_events.extend(batch)
+                if len(batch) < PAGE_SIZE:
+                    break
+                offset += PAGE_SIZE
 
-            all_events = resp.json()
-            query_lower = query.lower()
-            query_terms = query_lower.split()
+            except Exception:
+                break
 
-            matched = []
-            for event in all_events:
-                title = (event.get('title', '') or '').lower()
-                description = (event.get('description', '') or '').lower()
-                searchable = title + ' ' + description
+        self._event_cache = all_events
+        logger.debug(f"拉取了 {len(all_events)} 个事件")
+        return all_events
 
-                score = sum(1 for term in query_terms if term in searchable)
-                if score > 0:
-                    event['_relevance_score'] = score
-                    matched.append(event)
+    def _fetch_markets(self, active_only):
+        """分页拉取市场列表（带缓存）。"""
+        if self._market_cache:
+            return self._market_cache
 
-            matched.sort(key=lambda e: -e.get('_relevance_score', 0))
+        all_markets = []
+        offset = 0
 
-            results = []
-            for event in matched[:limit]:
-                normalized = {
-                    'id': event.get('id'),
-                    'title': event.get('title', ''),
-                    'description': event.get('description', ''),
-                    'markets': [
-                        self._normalize_market(m)
-                        for m in event.get('markets', [])
-                    ],
-                    'url': f"https://polymarket.com/event/{event.get('slug', event.get('id', ''))}",
+        for _ in range(MAX_PAGES):
+            try:
+                params = {
+                    'limit': PAGE_SIZE,
+                    'closed': 'false',
+                    'offset': offset,
                 }
-                results.append(normalized)
+                if active_only:
+                    params['active'] = 'true'
 
-            logger.info(f"Polymarket event search '{query}': found {len(results)} events")
-            return results
+                resp = self.session.get(
+                    f"{self.base_url}/markets",
+                    params=params,
+                    timeout=REQUEST_TIMEOUT
+                )
+                if resp.status_code != 200:
+                    break
 
-        except Exception as e:
-            logger.error(f"Polymarket event search failed: {e}")
-            return []
+                batch = resp.json()
+                if not batch:
+                    break
+
+                all_markets.extend(batch)
+                if len(batch) < PAGE_SIZE:
+                    break
+                offset += PAGE_SIZE
+
+            except Exception:
+                break
+
+        self._market_cache = all_markets
+        logger.debug(f"拉取了 {len(all_markets)} 个市场")
+        return all_markets
+
+    def clear_cache(self):
+        """清除缓存，下次搜索将重新拉取数据。"""
+        self._market_cache = []
+        self._event_cache = []
 
     def get_market(self, market_id):
-        """Get detailed info for a specific market.
-
-        Args:
-            market_id: Polymarket condition_id or market slug.
-
-        Returns:
-            Normalized market dict or None.
-        """
+        """获取单个市场详情。"""
         try:
             url = f"{self.base_url}/markets/{market_id}"
             resp = self.session.get(url, timeout=REQUEST_TIMEOUT)
 
             if resp.status_code != 200:
-                logger.warning(f"Polymarket market {market_id} returned {resp.status_code}")
+                logger.warning(f"Polymarket市场 {market_id} 返回 {resp.status_code}")
                 return None
 
             return self._normalize_market(resp.json())
 
         except Exception as e:
-            logger.error(f"Polymarket get_market failed: {e}")
+            logger.error(f"获取市场失败: {e}")
             return None
 
     def get_market_price(self, market_id):
-        """Get current YES/NO prices for a market.
-
-        Returns:
-            Dict with 'yes_price' and 'no_price' (0.0-1.0), or None.
-        """
+        """获取市场当前YES/NO价格。"""
         market = self.get_market(market_id)
         if market:
             return {
@@ -205,8 +268,8 @@ class PolymarketClient:
 
     @staticmethod
     def _normalize_market(market):
-        """Normalize a raw market object to a consistent format."""
-        # Extract token prices
+        """将原始市场数据标准化为统一格式。"""
+        # 从tokens字段提取价格
         tokens = market.get('tokens', [])
         yes_price = 0.0
         no_price = 0.0
@@ -218,12 +281,11 @@ class PolymarketClient:
             elif outcome == 'no':
                 no_price = price
 
-        # Fallback: try outcomePrices field
+        # 备用：从outcomePrices字段提取
         if yes_price == 0 and no_price == 0:
             outcome_prices = market.get('outcomePrices', '')
             if outcome_prices:
                 try:
-                    import json
                     prices = json.loads(outcome_prices) if isinstance(outcome_prices, str) else outcome_prices
                     if len(prices) >= 2:
                         yes_price = float(prices[0])
@@ -234,7 +296,7 @@ class PolymarketClient:
         condition_id = market.get('conditionId') or market.get('condition_id', '')
         slug = market.get('slug', '')
 
-        return {
+        result = {
             'id': condition_id,
             'slug': slug,
             'question': market.get('question', ''),
@@ -248,4 +310,7 @@ class PolymarketClient:
             'active': market.get('active', False),
             'closed': market.get('closed', False),
             'url': f"https://polymarket.com/market/{slug}" if slug else '',
+            '_normalized': True,
+            '_relevance_score': market.get('_relevance_score', 0),
         }
+        return result
