@@ -1,11 +1,9 @@
 name: Server Test
 on:
+  push:
+    paths:
+      - '.github/workflows/server-test.yml'
   workflow_dispatch:
-    inputs:
-      command:
-        description: 'Command to run on server'
-        required: false
-        default: 'cd /opt/a-stock-sentinel && source venv/bin/activate && set -a && source .env && set +a && echo === TEST === && python3 -c "from storage.sqlite_store import SentimentStore; s=SentimentStore(); print(s.get_stats())" && echo === AKSHARE === && python3 -c "import akshare as ak; df=ak.stock_zh_a_spot_em(); print(f\"OK: {len(df)}只\")" 2>&1 || echo akshare_failed && echo === TENCENT_API === && python3 -c "from social.tencent_api import get_stock_universe; df=get_stock_universe(); print(f\"OK: {len(df)}只\")" 2>&1 || echo tencent_failed && echo === KIMI === && python3 -c "from nlp.llm_analyzer import LLMAnalyzer; a=LLMAnalyzer(); print(f\"Kimi可用:{a.available}\")" 2>&1 && echo === CRONTAB === && crontab -l && echo === DONE ==='
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -13,22 +11,49 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: claude/review-project-history-DkFKw
-      - name: Run test on server
-        id: ssh_test
+      - name: Run server tests
         uses: appleboy/ssh-action@v1.2.2
         with:
           host: 49.232.132.165
           username: root
           password: ${{ secrets.SERVER_PASS }}
           timeout: 300s
-          script: ${{ github.event.inputs.command }}
-          capture_stdout: true
-      - name: Save results
+          script: |
+            cd /opt/a-stock-sentinel
+            source venv/bin/activate
+            set -a; source .env; set +a
+            echo '=== TIMEZONE ==='
+            date
+            echo '=== GIT STATUS ==='
+            git log --oneline -3
+            echo '=== AKSHARE ==='
+            python3 -c "import akshare as ak; df=ak.stock_zh_a_spot_em(); print(f'OK: {len(df)}')" 2>&1 || echo 'akshare_failed'
+            echo '=== TENCENT API ==='
+            python3 -c "
+import sys; sys.path.insert(0,'.')
+from social.tencent_api import get_stock_universe
+df=get_stock_universe()
+print(f'stocks: {len(df)}')
+if not df.empty:
+    print(df[['\u4ee3\u7801','\u540d\u79f0','\u6700\u65b0\u4ef7']].head(5).to_string())
+" 2>&1 || echo 'tencent_failed'
+            echo '=== KIMI ==='
+            python3 -c "from nlp.llm_analyzer import LLMAnalyzer; a=LLMAnalyzer(); print(f'available:{a.available}')" 2>&1
+            echo '=== DATABASE ==='
+            python3 -c "from storage.sqlite_store import SentimentStore; s=SentimentStore(); print(s.get_stats())" 2>&1
+            echo '=== CRONTAB ==='
+            crontab -l
+            echo '=== FULL PIPELINE TEST ==='
+            timeout 240 python3 scheduler.py full 2>&1 | tail -30
+            echo '=== DONE ==='
+      - name: Save results to repo
+        if: always()
         run: |
-          echo "${{ steps.ssh_test.outputs.stdout }}" > test_results.txt
-          echo "Test completed at $(date -u)" >> test_results.txt
+          cat > test_results.txt << 'EOF'
+          See GitHub Actions logs for full output.
+          EOF
           git config user.name 'github-actions'
           git config user.email 'actions@github.com'
           git add test_results.txt
-          git commit -m 'test: server test results [auto]' || true
+          git commit -m 'test: auto server test results' || true
           git push origin claude/review-project-history-DkFKw || true
