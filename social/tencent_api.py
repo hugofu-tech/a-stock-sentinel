@@ -85,7 +85,11 @@ def get_all_stock_codes() -> List[str]:
     # --- 深圳 ---
     try:
         import akshare as ak
-        sz_df = ak.stock_info_sz_name_code(indicator="A股列表")
+        # indicator参数在不同版本akshare中可能不兼容，做容错
+        try:
+            sz_df = ak.stock_info_sz_name_code(indicator="A股列表")
+        except TypeError:
+            sz_df = ak.stock_info_sz_name_code()
         if sz_df is not None and not sz_df.empty:
             code_col = None
             for col_name in ("A股代码", "code", "证券代码"):
@@ -108,7 +112,15 @@ def get_all_stock_codes() -> List[str]:
         logger.warning("[TencentAPI] 获取深圳代码失败: %s", exc)
 
     if not codes:
-        logger.warning("[TencentAPI] 未能获取任何股票代码")
+        # akshare也不可用时，用范围生成法覆盖主要A股代码段
+        logger.warning("[TencentAPI] akshare获取代码失败，使用范围生成")
+        # 上海主板 600000-603999
+        codes.extend([f'{i:06d}' for i in range(600000, 604000)])
+        # 深圳主板 000001-003999
+        codes.extend([f'{i:06d}' for i in range(1, 4000)])
+        # 创业板 300001-301999
+        codes.extend([f'{i:06d}' for i in range(300001, 302000)])
+        logger.info("[TencentAPI] 范围生成: %d 只候选代码", len(codes))
 
     # 去重
     codes = list(dict.fromkeys(codes))
