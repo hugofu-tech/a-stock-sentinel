@@ -1,69 +1,8 @@
-name: Deploy Remote API
-on:
-  push:
-    paths:
-      - '.github/workflows/deploy-api.yml'
-  workflow_dispatch:
+# Disabled - using server-test.yml instead
+name: Disabled
+on: workflow_dispatch
 jobs:
-  deploy:
+  disabled:
     runs-on: ubuntu-latest
     steps:
-      - name: Deploy to server
-        uses: appleboy/ssh-action@v1.2.2
-        with:
-          host: 49.232.132.165
-          username: root
-          password: ${{ secrets.SERVER_PASS }}
-          timeout: 180s
-          script: |
-            cd /opt/a-stock-sentinel
-            git config --global http.version HTTP/1.1
-            git pull origin claude/review-project-history-DkFKw || true
-            source venv/bin/activate
-            pip install flask python-dotenv -q
-            TOKEN=$(python3 -c "import secrets; print(secrets.token_hex(16))")
-            grep -q 'API_TOKEN' .env 2>/dev/null || echo "API_TOKEN=$TOKEN" >> .env
-            cat > remote_api.py << 'PYEOF'
-import os, subprocess, logging
-from flask import Flask, request, jsonify
-app = Flask(__name__)
-TOKEN = os.getenv('API_TOKEN', '')
-@app.route('/ping')
-def ping():
-    return jsonify({'status': 'ok'})
-@app.route('/exec', methods=['POST'])
-def exec_cmd():
-    if request.headers.get('Authorization') != f'Bearer {TOKEN}': return jsonify({'error': 'unauthorized'}), 401
-    cmd = request.json.get('cmd', '')
-    timeout = min(request.json.get('timeout', 120), 300)
-    try:
-        env = os.environ.copy()
-        env['PATH'] = '/opt/a-stock-sentinel/venv/bin:' + env.get('PATH', '')
-        r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout, cwd='/opt/a-stock-sentinel', env=env)
-        return jsonify({'stdout': r.stdout[-5000:], 'stderr': r.stderr[-2000:], 'rc': r.returncode})
-    except Exception as e: return jsonify({'error': str(e)}), 500
-if __name__ == '__main__':
-    logging.basicConfig(level=logging.INFO)
-    app.run(host='0.0.0.0', port=80)
-PYEOF
-            cat > /etc/systemd/system/sentinel-api.service << 'SVCEOF'
-[Unit]
-Description=Sentinel Remote API
-After=network.target
-[Service]
-Type=simple
-WorkingDirectory=/opt/a-stock-sentinel
-EnvironmentFile=/opt/a-stock-sentinel/.env
-Environment=PATH=/opt/a-stock-sentinel/venv/bin:/usr/bin:/bin
-ExecStart=/opt/a-stock-sentinel/venv/bin/python remote_api.py
-Restart=always
-[Install]
-WantedBy=multi-user.target
-SVCEOF
-            systemctl daemon-reload
-            systemctl enable sentinel-api
-            systemctl restart sentinel-api
-            sleep 3
-            curl -s http://localhost/ping
-            TOKEN_VAL=$(grep API_TOKEN .env | tail -1 | cut -d= -f2)
-            echo "REMOTE_API_TOKEN=$TOKEN_VAL"
+      - run: echo disabled
