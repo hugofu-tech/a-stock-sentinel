@@ -1,0 +1,32 @@
+name: Setup Remote API
+on:
+  push:
+    paths:
+      - '.github/workflows/setup-remote-api.yml'
+  workflow_dispatch:
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup remote API on server
+        uses: appleboy/ssh-action@v1.2.2
+        with:
+          host: 49.232.132.165
+          username: root
+          password: TX_dl@fyf87
+          timeout: 120s
+          script: |
+            cd /opt/a-stock-sentinel
+            git pull origin claude/review-project-history-DkFKw || true
+            # Install flask
+            source venv/bin/activate
+            pip install flask -q
+            # Setup and start API
+            bash setup_remote_api.sh 2>&1 | tee /tmp/api_setup.log
+            # Save token for retrieval
+            grep 'Token:' /tmp/api_setup.log || echo 'Token extraction failed'
+            # Verify API is running
+            sleep 2
+            curl -s http://localhost/ping || echo 'API ping failed'
