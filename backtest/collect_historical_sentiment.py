@@ -79,85 +79,88 @@ USER_AGENTS = [
 LIST_URL = "https://guba.eastmoney.com/list,{code}.html"
 LIST_URL_PAGED = "https://guba.eastmoney.com/list,{code},f_{page}.html"
 
-# East Money kline API for price data
-KLINE_API = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
+# Sina finance kline API (works from US sandbox unlike East Money kline API)
+SINA_KLINE_API = "https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/CN_MarketData.getKLineData"
 
 
 # ======================================================================
-# Step 0: Fetch price data from East Money API
+# Step 0: Fetch price data from Sina Finance API
 # ======================================================================
 
-def get_secid(stock_code: str) -> str:
-    """Generate East Money secid format."""
+def get_sina_symbol(stock_code: str) -> str:
+    """Convert stock code to Sina format (sh600519, sz000001)."""
     if stock_code.startswith("6"):
-        return f"1.{stock_code}"
-    return f"0.{stock_code}"
+        return f"sh{stock_code}"
+    return f"sz{stock_code}"
 
 
-def fetch_price_data_eastmoney(stock_code: str, start_date: str, end_date: str,
-                                session: requests.Session) -> Optional[pd.DataFrame]:
-    """Fetch daily kline data from East Money push API."""
-    secid = get_secid(stock_code)
+def fetch_price_data_sina(stock_code: str, datalen: int,
+                           session: requests.Session) -> Optional[pd.DataFrame]:
+    """Fetch daily kline data from Sina Finance API.
+
+    Sina API returns the last `datalen` days of kline data (scale=240 = daily).
+    """
+    symbol = get_sina_symbol(stock_code)
     params = {
-        "secid": secid,
-        "fields1": "f1,f2,f3,f4,f5,f6",
-        "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61",
-        "klt": "101",  # daily
-        "fqt": "1",    # qfq (forward adjusted)
-        "beg": start_date.replace("-", ""),
-        "end": end_date.replace("-", ""),
-        "lmt": "500",
-        "ut": "fa5fd1943c7b386f172d6893dbfba10b",
+        "symbol": symbol,
+        "scale": "240",    # daily
+        "ma": "no",
+        "datalen": str(datalen),
     }
 
     try:
-        time.sleep(0.5)
-        resp = session.get(KLINE_API, params=params, timeout=15)
+        time.sleep(0.8)
+        resp = session.get(SINA_KLINE_API, params=params, timeout=15)
         resp.raise_for_status()
         data = resp.json()
     except Exception as e:
         logger.warning(f"Failed to fetch price for {stock_code}: {e}")
         return None
 
-    klines = data.get("data", {}).get("klines", [])
-    if not klines:
+    if not data:
         logger.warning(f"No kline data for {stock_code}")
         return None
 
     rows = []
-    for line in klines:
-        parts = line.split(",")
-        if len(parts) >= 7:
+    for item in data:
+        try:
             rows.append({
-                "date": parts[0],
+                "date": item["day"],
                 "stock_code": stock_code,
-                "open": float(parts[1]),
-                "close": float(parts[2]),
-                "high": float(parts[3]),
-                "low": float(parts[4]),
-                "volume": float(parts[5]),
+                "open": float(item["open"]),
+                "high": float(item["high"]),
+                "low": float(item["low"]),
+                "close": float(item["close"]),
+                "volume": float(item["volume"]),
             })
+        except (KeyError, ValueError) as e:
+            continue
+
+    if not rows:
+        return None
 
     df = pd.DataFrame(rows)
     df["date"] = pd.to_datetime(df["date"])
     return df
 
 
-def fetch_all_price_data(stock_codes: List[str], start_date: str,
-                          end_date: str) -> pd.DataFrame:
-    """Fetch price data for all stocks from East Money API."""
+def fetch_all_price_data(stock_codes: List[str], datalen: int = 120) -> pd.DataFrame:
+    """Fetch price data for all stocks from Sina Finance API."""
     session = requests.Session()
     session.headers.update({
         "User-Agent": random.choice(USER_AGENTS),
-        "Referer": "https://quote.eastmoney.com/",
+        "Referer": "https://finance.sina.com.cn/",
     })
 
     frames = []
     for i, code in enumerate(stock_codes, 1):
         logger.info(f"  Fetching price data {code} ({i}/{len(stock_codes)})")
-        df = fetch_price_data_eastmoney(code, start_date, end_date, session)
+        df = fetch_price_data_sina(code, datalen, session)
         if df is not None and not df.empty:
             frames.append(df)
+            logger.info(f"    {code}: {len(df)} records, "
+                        f"{df['date'].min().strftime('%Y-%m-%d')} ~ "
+                        f"{df['date'].max().strftime('%Y-%m-%d')}")
 
     session.close()
 
@@ -756,8 +759,8 @@ def main():
         price_data["date"] = pd.to_datetime(price_data["date"])
     else:
         stock_codes = [s["code"] for s in STOCKS]
-        print(f"  Fetching price data for {len(stock_codes)} stocks: {price_start} ~ {price_end}")
-        price_data = fetch_all_price_data(stock_codes, price_start, price_end)
+        print(f"  Fetching price data for {len(stock_codes)} stocks via Sina API (last 120 days)")
+        price_data = fetch_all_price_data(stock_codes, datalen=120)
         if not price_data.empty:
             price_data.to_csv(PRICE_CACHE, index=False)
             logger.info(f"Price data cached to {PRICE_CACHE}")
