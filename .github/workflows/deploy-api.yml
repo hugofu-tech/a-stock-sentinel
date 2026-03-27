@@ -1,0 +1,73 @@
+name: Deploy Remote API
+on:
+  push:
+    paths:
+      - '.github/workflows/deploy-api.yml'
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to server
+        uses: appleboy/ssh-action@v1.2.2
+        with:
+          host: 49.232.132.165
+          username: root
+          password: ${{ secrets.SERVER_PASS }}
+          timeout: 180s
+          script: |
+            cd /opt/a-stock-sentinel
+            # 先同步代码
+            git config --global http.version HTTP/1.1
+            git pull origin claude/review-project-history-DkFKw || true
+            # 安装flask
+            source venv/bin/activate
+            pip install flask python-dotenv -q
+            # 生成token并写入.env
+            TOKEN=$(python3 -c "import secrets; print(secrets.token_hex(16))")
+            grep -q 'API_TOKEN' .env 2>/dev/null || echo "API_TOKEN=$TOKEN" >> .env
+            # 创建API服务文件
+            cat > remote_api.py << 'PYEOF'
+            import os, subprocess, logging
+            from flask import Flask, request, jsonify
+            app = Flask(__name__)
+            TOKEN = os.getenv('API_TOKEN', '')
+            @app.route('/ping')
+            def ping():
+                return jsonify({'status': 'ok'})
+            @app.route('/exec', methods=['POST'])
+            def exec_cmd():
+                if request.headers.get('Authorization') != f'Bearer {TOKEN}': return jsonify({'error': 'unauthorized'}), 401
+                cmd = request.json.get('cmd', '')
+                timeout = min(request.json.get('timeout', 120), 300)
+                try:
+                    r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout, cwd='/opt/a-stock-sentinel')
+                    return jsonify({'stdout': r.stdout[-5000:], 'stderr': r.stderr[-2000:], 'rc': r.returncode})
+                except Exception as e: return jsonify({'error': str(e)}), 500
+            if __name__ == '__main__':
+                logging.basicConfig(level=logging.INFO)
+                app.run(host='0.0.0.0', port=80)
+            PYEOF
+            # 用sed去掉前导空格
+            sed -i 's/^            //' remote_api.py
+            # 创建systemd服务
+            cat > /etc/systemd/system/sentinel-api.service << 'SVCEOF'
+            [Unit]
+            Description=Sentinel Remote API
+            After=network.target
+            [Service]
+            Type=simple
+            WorkingDirectory=/opt/a-stock-sentinel
+            EnvironmentFile=/opt/a-stock-sentinel/.env
+            Environment=PATH=/opt/a-stock-sentinel/venv/bin:/usr/bin:/bin
+            ExecStart=/opt/a-stock-sentinel/venv/bin/python remote_api.py
+            Restart=always
+            [Install]
+            WantedBy=multi-user.target
+            SVCEOF
+            sed -i 's/^            //' /etc/systemd/system/sentinel-api.service
+            systemctl daemon-reload
+            systemctl enable sentinel-api
+            systemctl restart sentinel-api
+            sleep 2
+            curl -s http://localhost/ping
+            echo "TOKEN=$TOKEN"
