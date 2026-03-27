@@ -9,12 +9,13 @@ import json
 import sys
 from datetime import datetime, timedelta
 
-# 配置
-GITHUB_TOKEN = "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"
+# 配置 — 从环境变量读取，不硬编码密钥
+import os
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
 REPO = "hugofu-tech/a-stock-sentinel"
-FEISHU_APP_ID = "cli_a9f70dfaa379dbd7"
-FEISHU_APP_SECRET = "j5MoWSysARI0tQLLfeywWfKRXEunzv7Y"
-FEISHU_TARGET = "user:ou_0ad234b6ebfca4f424bd582393734d0f"
+FEISHU_APP_ID = os.getenv("FEISHU_APP_ID", "")
+FEISHU_APP_SECRET = os.getenv("FEISHU_APP_SECRET", "")
+FEISHU_TARGET = os.getenv("FEISHU_TARGET", "")
 
 headers = {
     "Authorization": f"token {GITHUB_TOKEN}",

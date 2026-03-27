@@ -13,10 +13,10 @@ import akshare as ak
 
 sys.path.insert(0, '/Users/hugo/.openclaw/workspace')
 
-# 飞书配置
-FEISHU_APP_ID = "cli_a9f70dfaa379dbd7"
-FEISHU_APP_SECRET = "j5MoWSysARI0tQLLfeywWfKRXEunzv7Y"
-FEISHU_TARGET = "user:ou_0ad234b6ebfca4f424bd582393734d0f"
+# 飞书配置 — 从环境变量读取
+FEISHU_APP_ID = os.getenv("FEISHU_APP_ID", "")
+FEISHU_APP_SECRET = os.getenv("FEISHU_APP_SECRET", "")
+FEISHU_TARGET = os.getenv("FEISHU_TARGET", "")
 
 
 def get_feishu_token():

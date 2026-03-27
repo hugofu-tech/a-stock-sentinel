@@ -135,26 +135,30 @@ class SentimentScheduler:
         else:
             logger.info("[Scheduler] 未配置 LLM_API_KEY，跳过 LLM 验证")
 
-        # -- FeishuPusher（通知） --
-        self.pusher = None
+        # -- FeishuSender（通知） --
+        self.feishu = None
         try:
-            from feishu_pusher import FeishuPusher
-            self.pusher = FeishuPusher(webhook_url=FEISHU_WEBHOOK_URL)
-            logger.info("[Scheduler] FeishuPusher 初始化成功")
+            from notification.feishu_sender import FeishuSender
+            self.feishu = FeishuSender()
+            if self.feishu.available:
+                logger.info("[Scheduler] FeishuSender 初始化成功")
+            else:
+                logger.info("[Scheduler] FeishuSender 未配置，跳过飞书通知")
+                self.feishu = None
         except Exception as exc:
-            logger.warning("[Scheduler] FeishuPusher 初始化失败: %s", exc)
+            logger.warning("[Scheduler] FeishuSender 初始化失败: %s", exc)
 
         logger.info(
             "[Scheduler] 初始化完成 | 组件状态: "
             "SourceManager=%s, NLP=%s, Scorer=%s, Store=%s, StockScorer=%s, "
-            "LLM=%s, Pusher=%s",
+            "LLM=%s, Feishu=%s",
             self.source_manager is not None,
             self.nlp_analyzer is not None,
             self.sentiment_scorer is not None,
             self.store is not None,
             self.stock_scorer is not None,
             self.llm_analyzer is not None,
-            self.pusher is not None,
+            self.feishu is not None,
         )
 
     # ==================================================================
@@ -317,7 +321,18 @@ class SentimentScheduler:
             )[:top_n]
             for cand in top_candidates:
                 try:
-                    llm_result = self.llm_analyzer.analyze(cand)
+                    # 获取该股票最近的帖子标题用于LLM分析
+                    post_titles = []
+                    if self.store:
+                        posts = self.store.get_posts(cand.stock_code, hours=48)
+                        post_titles = [p.title for p in posts[:20]]
+                    if not post_titles:
+                        post_titles = [f"{cand.stock_name}情绪分析"]
+                    llm_result = self.llm_analyzer.analyze_stock_sentiment(
+                        stock_code=cand.stock_code,
+                        stock_name=cand.stock_name,
+                        posts_titles=post_titles,
+                    )
                     if isinstance(llm_result, dict):
                         cand.llm_summary = llm_result.get("summary", "")
                         llm_score = llm_result.get("score")
@@ -854,9 +869,9 @@ class SentimentScheduler:
         today_str = datetime.now(BEIJING_TZ).strftime("%Y-%m-%d")
 
         # 飞书通知
-        if self.pusher and FEISHU_WEBHOOK_URL:
+        if self.feishu:
             try:
-                success = self.pusher.send_text(report)
+                success = self.feishu.send_daily_report(report, today_str)
                 if success:
                     logger.info("[通知] 飞书发送成功")
                     sent_any = True
