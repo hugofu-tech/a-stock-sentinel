@@ -220,7 +220,31 @@ class SentimentScheduler:
             logger.warning("[夜间管线] %s", msg)
             summary["errors"].append(msg)
 
-        # ---- 3. SnowNLP 批量分析 + 聚合 ----
+        # ---- 3. 补充数据源：通过akshare获取雪球/微博热度 ----
+        xueqiu_scores = {}
+        weibo_names = set()
+        try:
+            import akshare as ak
+            # 雪球热门讨论
+            xq_tweet = ak.stock_hot_tweet_xq()
+            if xq_tweet is not None and not xq_tweet.empty:
+                for _, row in xq_tweet.iterrows():
+                    code = str(row.get('股票代码', '')).replace('SH', '').replace('SZ', '')
+                    xueqiu_scores[code] = float(row.get('关注', 0))
+                logger.info("[夜间管线] 雪球讨论热度: %d 只", len(xueqiu_scores))
+
+            # 微博热股
+            wb = ak.stock_js_weibo_report()
+            if wb is not None and not wb.empty:
+                weibo_names = set(wb['name'].tolist())
+                logger.info("[夜间管线] 微博热股: %d 只", len(weibo_names))
+        except Exception as exc:
+            logger.warning("[夜间管线] akshare雪球/微博数据获取失败: %s", exc)
+
+        summary["xueqiu_count"] = len(xueqiu_scores)
+        summary["weibo_count"] = len(weibo_names)
+
+        # ---- 4. SnowNLP 批量分析 + 聚合 ----
         if self.nlp_analyzer and all_posts_by_source:
             sentiments_stored = self._analyze_and_store(
                 all_posts_by_source, today_str
