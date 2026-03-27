@@ -1,12 +1,12 @@
 """
 Trump Social Media -> Polymarket Trading Signal System
-Configuration Module
+配置模块
 """
 
 import os
 
 # ============================================================
-# Social Media Monitoring
+# 社交媒体监控
 # ============================================================
 
 # Twitter/X API
@@ -18,28 +18,29 @@ TRUMP_TWITTER_USERNAME = "realDonaldTrump"
 TRUTH_SOCIAL_USERNAME = "realDonaldTrump"
 TRUTH_SOCIAL_BASE_URL = "https://truthsocial.com"
 
-# Polling interval (seconds)
+# 轮询间隔（秒）
 POLL_INTERVAL = 30
 
 # ============================================================
-# LLM Analysis (Claude API)
+# LLM分析（Kimi API - OpenAI兼容格式）
 # ============================================================
 
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
-ANTHROPIC_MODEL = "claude-sonnet-4-20250514"
+KIMI_API_KEY = os.getenv("KIMI_API_KEY", "sk-kimi-e54HLtfDf4T0Mei4nxcZt7l14vQMG9QigQPaeL1vmjdyTc5GT3wMXwOqsEaKISGk")
+KIMI_BASE_URL = os.getenv("KIMI_BASE_URL", "https://api.kimi.com/coding/v1")
+KIMI_MODEL = os.getenv("KIMI_MODEL", "kimi-for-coding")
 
-# Topics that may impact Polymarket
+# 可影响Polymarket的主题类别
 TOPIC_CATEGORIES = [
-    "tariffs_trade",        # Tariffs, trade war, trade deals
-    "crypto_digital",       # Bitcoin, crypto regulation, CBDC
-    "foreign_policy",       # China, Russia, Ukraine, NATO, sanctions
-    "election_politics",    # Elections, candidates, campaigns
-    "economy_fiscal",       # Tax, spending, debt ceiling, Fed
-    "regulation_policy",    # Executive orders, regulation changes
-    "personnel",            # Cabinet picks, firings, appointments
-    "legal_judicial",       # Court cases, investigations, pardons
-    "military_defense",     # Military actions, defense spending
-    "tech_social_media",    # TikTok, Big Tech, Section 230
+    "tariffs_trade",        # 关税、贸易战、贸易协议
+    "crypto_digital",       # 比特币、加密货币监管、CBDC
+    "foreign_policy",       # 中国、俄罗斯、乌克兰、NATO、制裁
+    "election_politics",    # 选举、候选人、竞选
+    "economy_fiscal",       # 税收、支出、债务上限、美联储
+    "regulation_policy",    # 行政令、监管变化
+    "personnel",            # 内阁人选、解雇、任命
+    "legal_judicial",       # 法院案件、调查、赦免
+    "military_defense",     # 军事行动、国防开支
+    "tech_social_media",    # TikTok、大科技、Section 230
 ]
 
 # ============================================================
@@ -49,35 +50,35 @@ TOPIC_CATEGORIES = [
 POLYMARKET_GAMMA_API = "https://gamma-api.polymarket.com"
 POLYMARKET_CLOB_API = "https://clob.polymarket.com"
 
-# Phase 2: Trading credentials
+# 第二阶段：交易凭证
 POLYMARKET_API_KEY = os.getenv("POLYMARKET_API_KEY", "")
 POLYMARKET_SECRET = os.getenv("POLYMARKET_SECRET", "")
 POLYMARKET_PASSPHRASE = os.getenv("POLYMARKET_PASSPHRASE", "")
 
-# Trading parameters
-MAX_POSITION_SIZE_USDC = 50  # Maximum position per trade
-MIN_CONFIDENCE_THRESHOLD = 60  # Minimum confidence % to generate signal
+# 交易参数
+MAX_POSITION_SIZE_USDC = 50  # 单笔最大仓位
+MIN_CONFIDENCE_THRESHOLD = 60  # 生成信号的最低置信度%
 MAX_DAILY_TRADES = 10
 
 # ============================================================
-# Email Notification
+# 邮件通知（QQ邮箱SMTP）
 # ============================================================
 
-SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
+SMTP_HOST = os.getenv("SMTP_HOST", "smtp.qq.com")
 SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
-SMTP_USER = os.getenv("SMTP_USER", "")
-SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
-EMAIL_RECIPIENTS = os.getenv("EMAIL_RECIPIENTS", "").split(",")
+SMTP_USER = os.getenv("SMTP_USER", "fyf1028@qq.com")
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "pkrbqgunhnlabhhh")
+EMAIL_RECIPIENTS = os.getenv("EMAIL_RECIPIENTS", "fyf1028@126.com").split(",")
 
 # ============================================================
-# State Management
+# 状态管理
 # ============================================================
 
 POST_STORE_FILE = os.getenv("POST_STORE_FILE", "data/seen_posts.json")
-MAX_STORED_POSTS = 1000  # Keep last N posts for dedup
+MAX_STORED_POSTS = 1000  # 保留最近N条推文用于去重
 
 # ============================================================
-# Logging
+# 日志
 # ============================================================
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")

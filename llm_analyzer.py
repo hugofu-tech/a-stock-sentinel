@@ -1,19 +1,19 @@
 """
-LLM-based Post Analyzer
-Uses Claude API to analyze Trump's social media posts and determine:
-1. Topic classification
-2. Market impact assessment
-3. Relevant Polymarket keywords
-4. Suggested trading direction and confidence
+LLM推文分析器
+使用Kimi API（OpenAI兼容格式）分析特朗普的社交媒体推文：
+1. 主题分类
+2. 市场影响评估
+3. Polymarket关键词匹配
+4. 交易方向和置信度建议
 
-Returns structured analysis as a dict.
+返回结构化的分析字典。
 """
 
 import json
 import logging
-from anthropic import Anthropic
+from openai import OpenAI
 
-from trump_config import ANTHROPIC_API_KEY, ANTHROPIC_MODEL, TOPIC_CATEGORIES
+from trump_config import KIMI_API_KEY, KIMI_BASE_URL, KIMI_MODEL, TOPIC_CATEGORIES
 
 logger = logging.getLogger(__name__)
 
@@ -61,29 +61,33 @@ Return your analysis as JSON."""
 
 
 class LLMAnalyzer:
-    """Analyzes Trump's posts using Claude API for market impact assessment."""
+    """使用Kimi API分析特朗普推文的市场影响。"""
 
     def __init__(self):
         self.client = None
-        if ANTHROPIC_API_KEY:
-            self.client = Anthropic(api_key=ANTHROPIC_API_KEY)
-        self.model = ANTHROPIC_MODEL
+        if KIMI_API_KEY:
+            self.client = OpenAI(
+                api_key=KIMI_API_KEY,
+                base_url=KIMI_BASE_URL,
+                default_headers={"User-Agent": "claude-code/2.1"},
+            )
+        self.model = KIMI_MODEL
 
     def is_configured(self):
-        """Check if Claude API is available."""
+        """检查Kimi API是否可用。"""
         return self.client is not None
 
     def analyze_post(self, post):
-        """Analyze a single post for market impact.
+        """分析单条推文的市场影响。
 
         Args:
-            post: Normalized post dict from trump_monitor.
+            post: trump_monitor返回的标准化推文字典。
 
         Returns:
-            Analysis dict with trading signals, or None on failure.
+            包含交易信号的分析字典，失败时返回降级分析。
         """
         if not self.is_configured():
-            logger.warning("Claude API not configured (no ANTHROPIC_API_KEY)")
+            logger.warning("Kimi API未配置（缺少KIMI_API_KEY）")
             return self._fallback_analysis(post)
 
         try:
@@ -95,17 +99,20 @@ class LLMAnalyzer:
                 content=post.get('content', ''),
             )
 
-            response = self.client.messages.create(
+            response = self.client.chat.completions.create(
                 model=self.model,
-                max_tokens=1024,
-                system=system,
-                messages=[{"role": "user", "content": user_msg}],
+                max_tokens=4096,  # Kimi思考模型需要更多token（推理+输出）
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user_msg},
+                ],
+                temperature=0.3,  # 低温度保证输出稳定
             )
 
-            # Extract text content
-            text = response.content[0].text.strip()
+            # 提取文本
+            text = response.choices[0].message.content.strip()
 
-            # Parse JSON from response (handle markdown code blocks)
+            # 处理markdown代码块包裹
             if text.startswith('```'):
                 text = text.split('\n', 1)[1]
                 text = text.rsplit('```', 1)[0]
@@ -113,40 +120,37 @@ class LLMAnalyzer:
 
             analysis = json.loads(text)
 
-            # Validate required fields
+            # 验证必填字段
             required_fields = [
                 'topic_category', 'market_impact_score', 'polymarket_keywords',
                 'suggested_direction', 'confidence', 'is_actionable'
             ]
             for field in required_fields:
                 if field not in analysis:
-                    logger.warning(f"Missing field in LLM response: {field}")
+                    logger.warning(f"LLM响应缺少字段: {field}")
                     analysis[field] = self._default_value(field)
 
-            # Attach original post reference
+            # 附加原始推文引用
             analysis['post_id'] = post.get('id')
             analysis['post_source'] = post.get('source')
 
             logger.info(
-                f"Analysis complete: impact={analysis['market_impact_score']}, "
-                f"actionable={analysis['is_actionable']}, "
-                f"confidence={analysis.get('confidence', 0)}%"
+                f"Kimi分析完成: 影响={analysis['market_impact_score']}, "
+                f"可操作={analysis['is_actionable']}, "
+                f"置信={analysis.get('confidence', 0)}%"
             )
 
             return analysis
 
         except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse LLM response as JSON: {e}")
+            logger.error(f"解析LLM响应JSON失败: {e}")
             return self._fallback_analysis(post)
         except Exception as e:
-            logger.error(f"LLM analysis failed: {e}")
+            logger.error(f"Kimi API调用失败: {e}")
             return self._fallback_analysis(post)
 
     def analyze_batch(self, posts):
-        """Analyze multiple posts, returning list of analyses.
-
-        Only returns analyses for actionable posts.
-        """
+        """批量分析多条推文。"""
         results = []
         for post in posts:
             analysis = self.analyze_post(post)
@@ -229,7 +233,7 @@ class LLMAnalyzer:
 
     @staticmethod
     def _default_value(field):
-        """Return default value for missing analysis fields."""
+        """返回缺失字段的默认值。"""
         defaults = {
             'topic_category': 'unknown',
             'market_impact_score': 1,
@@ -239,6 +243,6 @@ class LLMAnalyzer:
             'confidence': 0,
             'is_actionable': False,
             'urgency': 'low',
-            'impact_reasoning': 'Analysis incomplete',
+            'impact_reasoning': '分析不完整',
         }
         return defaults.get(field)
