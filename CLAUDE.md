@@ -99,6 +99,6 @@
 4. **开发顺序**: 东方财富→雪球→微博→市值风云，按数据量和API友好度排序
 
 ## 老板待提供信息
-- [ ] QQ邮箱SMTP授权码（Phase 7时需要）
+- [x] QQ邮箱SMTP授权码（已提供：fyf1028@qq.com）
 - [x] Kimi K2.5 API Key（已提供，Coding Plan Allegretto）
 - [x] 腾讯云服务器（已购买，49.232.132.165）
