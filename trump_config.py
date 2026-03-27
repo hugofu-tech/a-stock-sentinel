@@ -21,6 +21,9 @@ TRUTH_SOCIAL_BASE_URL = "https://truthsocial.com"
 # 轮询间隔（秒）
 POLL_INTERVAL = 30
 
+# Playwright浏览器设置
+PLAYWRIGHT_HEADLESS = os.getenv("PLAYWRIGHT_HEADLESS", "true").lower() == "true"
+
 # ============================================================
 # LLM分析（Kimi API - OpenAI兼容格式）
 # ============================================================

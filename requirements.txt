@@ -7,3 +7,4 @@ numpy>=1.24.0
 # Trump Sentinel - Social Media -> Polymarket Signals
 openai>=1.0.0
 beautifulsoup4>=4.12.0
+playwright>=1.40.0

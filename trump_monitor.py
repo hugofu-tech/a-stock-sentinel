@@ -2,13 +2,15 @@
 特朗普社交媒体监控器
 轮询Truth Social和X(Twitter)获取特朗普最新发帖。
 
-数据源策略：
-- Truth Social：官方API返回403，使用多层备用方案
-  1. RSS订阅
-  2. 第三方聚合API（如RapidAPI的Truth Social端点）
-  3. 公开的Mastodon兼容API
-  4. 直接网页抓取
-- X/Twitter：Twitter API v2（需Bearer Token）
+数据源策略（优先级从高到低）：
+- Truth Social:
+  1. Playwright浏览器渲染（最可靠，绕过403）
+  2. RSS订阅
+  3. Mastodon兼容API
+  4. requests网页抓取
+- X/Twitter:
+  1. Playwright浏览器渲染（无需API Key）
+  2. Twitter API v2（需Bearer Token）
 
 统一输出格式：
 {
@@ -38,328 +40,451 @@ from trump_config import (
     TRUMP_TWITTER_USERNAME,
     TRUTH_SOCIAL_USERNAME,
     TRUTH_SOCIAL_BASE_URL,
+    PLAYWRIGHT_HEADLESS,
 )
 
 logger = logging.getLogger(__name__)
 
 REQUEST_TIMEOUT = 15
 
+# ============================================================
+# Playwright浏览器引擎（首选方案）
+# ============================================================
 
-class TruthSocialMonitor:
-    """通过多种方式监控特朗普的Truth Social账号。"""
+def _get_playwright_browser():
+    """启动Playwright浏览器实例。"""
+    try:
+        from playwright.sync_api import sync_playwright
+        pw = sync_playwright().start()
+        browser = pw.chromium.launch(
+            headless=PLAYWRIGHT_HEADLESS,
+            args=[
+                '--no-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-blink-features=AutomationControlled',
+            ]
+        )
+        return pw, browser
+    except Exception as e:
+        logger.debug(f"Playwright启动失败: {e}")
+        return None, None
+
+
+class PlaywrightTruthSocialMonitor:
+    """通过Playwright浏览器渲染获取Truth Social推文（最可靠）。"""
+
+    def fetch_posts(self, limit=20):
+        """用浏览器访问Truth Social个人页面，等待JS渲染后提取推文。"""
+        pw, browser = None, None
+        try:
+            pw, browser = _get_playwright_browser()
+            if not browser:
+                return []
+
+            page = browser.new_page(
+                user_agent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
+                           'AppleWebKit/537.36 (KHTML, like Gecko) '
+                           'Chrome/131.0.0.0 Safari/537.36'
+            )
+
+            url = f"{TRUTH_SOCIAL_BASE_URL}/@{TRUTH_SOCIAL_USERNAME}"
+            logger.info(f"Playwright访问: {url}")
+            page.goto(url, timeout=30000, wait_until='networkidle')
+            page.wait_for_timeout(3000)  # 额外等待JS渲染
+
+            posts = []
+
+            # Truth Social基于Mastodon，推文在特定DOM结构中
+            # 尝试多种选择器
+            selectors = [
+                'div[data-testid="status"]',
+                'article',
+                '.status',
+                'div.status-content',
+                '[class*="status"]',
+            ]
+
+            status_elements = []
+            for sel in selectors:
+                status_elements = page.query_selector_all(sel)
+                if status_elements:
+                    logger.debug(f"选择器 '{sel}' 匹配到 {len(status_elements)} 个元素")
+                    break
+
+            if not status_elements:
+                # 回退：从页面JSON数据提取
+                posts = self._extract_from_page_data(page, limit)
+                if posts:
+                    logger.info(f"Playwright Truth Social (JSON): 获取 {len(posts)} 条")
+                    return posts
+
+                # 再回退：从整个页面文本提取
+                logger.debug("尝试从页面文本提取推文")
+                posts = self._extract_from_page_text(page, limit)
+                if posts:
+                    logger.info(f"Playwright Truth Social (文本): 获取 {len(posts)} 条")
+                    return posts
+
+                logger.warning("Playwright未找到任何推文元素")
+                return []
+
+            # 从DOM元素中提取推文
+            for elem in status_elements[:limit]:
+                try:
+                    content = elem.inner_text()
+                    if not content or len(content.strip()) < 5:
+                        continue
+
+                    # 尝试获取链接
+                    link = elem.query_selector('a[href*="/@"]')
+                    post_url = link.get_attribute('href') if link else ''
+                    post_id = self._extract_id(post_url)
+
+                    # 尝试获取时间
+                    time_elem = elem.query_selector('time')
+                    created_at = ''
+                    if time_elem:
+                        created_at = time_elem.get_attribute('datetime') or ''
+
+                    posts.append({
+                        'id': f"ts_{post_id}",
+                        'source': 'truth_social',
+                        'content': content.strip(),
+                        'created_at': created_at or datetime.now(timezone.utc).isoformat(),
+                        'url': f"{TRUTH_SOCIAL_BASE_URL}{post_url}" if post_url else url,
+                        'media_urls': [],
+                        'is_repost': False,
+                    })
+                except Exception:
+                    continue
+
+            logger.info(f"Playwright Truth Social (DOM): 获取 {len(posts)} 条")
+            return posts
+
+        except Exception as e:
+            logger.error(f"Playwright Truth Social失败: {e}")
+            return []
+        finally:
+            if browser:
+                browser.close()
+            if pw:
+                pw.stop()
+
+    def _extract_from_page_data(self, page, limit):
+        """从页面内嵌的JSON初始数据中提取推文。"""
+        posts = []
+        try:
+            # 很多SPA会在script标签中内嵌初始数据
+            scripts = page.query_selector_all('script[type="application/json"]')
+            for script in scripts:
+                try:
+                    data = json.loads(script.inner_text())
+                    posts.extend(self._recurse_json(data, limit))
+                except (json.JSONDecodeError, TypeError):
+                    continue
+
+            # 也尝试从__NEXT_DATA__或类似全局变量提取
+            for var_name in ['__NEXT_DATA__', '__INITIAL_STATE__', '__PRELOADED_STATE__']:
+                try:
+                    data = page.evaluate(f'window.{var_name}')
+                    if data:
+                        posts.extend(self._recurse_json(data, limit))
+                except Exception:
+                    continue
+
+        except Exception as e:
+            logger.debug(f"页面数据提取失败: {e}")
+
+        return posts[:limit]
+
+    def _extract_from_page_text(self, page, limit):
+        """从页面可见文本中提取推文（最后手段）。"""
+        posts = []
+        try:
+            body_text = page.inner_text('body')
+            # 按段落分割，过滤掉导航等短文本
+            paragraphs = [p.strip() for p in body_text.split('\n\n') if len(p.strip()) > 30]
+
+            for i, text in enumerate(paragraphs[:limit]):
+                if any(skip in text.lower() for skip in ['sign in', 'log in', 'cookie', 'privacy']):
+                    continue
+                posts.append({
+                    'id': f"ts_text_{int(time.time())}_{i}",
+                    'source': 'truth_social',
+                    'content': text[:500],
+                    'created_at': datetime.now(timezone.utc).isoformat(),
+                    'url': f"{TRUTH_SOCIAL_BASE_URL}/@{TRUTH_SOCIAL_USERNAME}",
+                    'media_urls': [],
+                    'is_repost': False,
+                })
+        except Exception as e:
+            logger.debug(f"页面文本提取失败: {e}")
+
+        return posts
+
+    def _recurse_json(self, data, limit, depth=0):
+        """递归搜索JSON数据中的推文。"""
+        if depth > 10:
+            return []
+        posts = []
+        if isinstance(data, dict):
+            if 'content' in data and ('account' in data or 'user' in data):
+                content = data.get('content', '')
+                if content and '<' in content:
+                    soup = BeautifulSoup(content, 'html.parser')
+                    content = soup.get_text(strip=True)
+                if content:
+                    posts.append({
+                        'id': f"ts_{data.get('id', hash(content))}",
+                        'source': 'truth_social',
+                        'content': content,
+                        'created_at': data.get('created_at', ''),
+                        'url': data.get('url', ''),
+                        'media_urls': [],
+                        'is_repost': data.get('reblog') is not None,
+                    })
+            for v in data.values():
+                if isinstance(v, (dict, list)) and len(posts) < limit:
+                    posts.extend(self._recurse_json(v, limit, depth + 1))
+        elif isinstance(data, list):
+            for item in data:
+                if isinstance(item, (dict, list)) and len(posts) < limit:
+                    posts.extend(self._recurse_json(item, limit, depth + 1))
+        return posts[:limit]
+
+    @staticmethod
+    def _extract_id(url_or_guid):
+        if not url_or_guid:
+            return str(int(time.time() * 1000))
+        match = re.search(r'/(\d+)', url_or_guid)
+        return match.group(1) if match else str(hash(url_or_guid))
+
+
+class PlaywrightTwitterMonitor:
+    """通过Playwright浏览器渲染获取X/Twitter推文（无需API Key）。"""
+
+    def fetch_posts(self, limit=10):
+        """用浏览器访问X个人页面并提取推文。"""
+        pw, browser = None, None
+        try:
+            pw, browser = _get_playwright_browser()
+            if not browser:
+                return []
+
+            page = browser.new_page(
+                user_agent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
+                           'AppleWebKit/537.36 (KHTML, like Gecko) '
+                           'Chrome/131.0.0.0 Safari/537.36'
+            )
+
+            url = f"https://x.com/{TRUMP_TWITTER_USERNAME}"
+            logger.info(f"Playwright访问: {url}")
+            page.goto(url, timeout=30000, wait_until='networkidle')
+            page.wait_for_timeout(5000)  # X加载较慢
+
+            posts = []
+
+            # X的推文在article标签或data-testid="tweet"中
+            tweet_elements = page.query_selector_all('article[data-testid="tweet"]')
+            if not tweet_elements:
+                tweet_elements = page.query_selector_all('article')
+
+            logger.debug(f"找到 {len(tweet_elements)} 个推文元素")
+
+            for elem in tweet_elements[:limit]:
+                try:
+                    # 推文文本在 [data-testid="tweetText"] 中
+                    text_elem = elem.query_selector('[data-testid="tweetText"]')
+                    if not text_elem:
+                        continue
+
+                    content = text_elem.inner_text().strip()
+                    if not content:
+                        continue
+
+                    # 提取推文链接获取ID
+                    link = elem.query_selector('a[href*="/status/"]')
+                    tweet_url = ''
+                    tweet_id = str(int(time.time() * 1000))
+                    if link:
+                        href = link.get_attribute('href') or ''
+                        match = re.search(r'/status/(\d+)', href)
+                        if match:
+                            tweet_id = match.group(1)
+                            tweet_url = f"https://x.com{href}" if href.startswith('/') else href
+
+                    # 获取时间
+                    time_elem = elem.query_selector('time')
+                    created_at = ''
+                    if time_elem:
+                        created_at = time_elem.get_attribute('datetime') or ''
+
+                    # 判断是否是转发
+                    retweet_indicator = elem.query_selector('[data-testid="socialContext"]')
+                    is_repost = bool(retweet_indicator)
+
+                    posts.append({
+                        'id': f"tw_{tweet_id}",
+                        'source': 'twitter',
+                        'content': content,
+                        'created_at': created_at or datetime.now(timezone.utc).isoformat(),
+                        'url': tweet_url,
+                        'media_urls': [],
+                        'is_repost': is_repost,
+                    })
+                except Exception:
+                    continue
+
+            logger.info(f"Playwright Twitter: 获取 {len(posts)} 条推文")
+            return posts
+
+        except Exception as e:
+            logger.error(f"Playwright Twitter失败: {e}")
+            return []
+        finally:
+            if browser:
+                browser.close()
+            if pw:
+                pw.stop()
+
+
+# ============================================================
+# HTTP备用方案（无需浏览器）
+# ============================================================
+
+class HttpTruthSocialMonitor:
+    """通过HTTP请求获取Truth Social推文（备用方案）。"""
 
     def __init__(self):
         self.session = requests.Session()
         self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
                           'AppleWebKit/537.36 (KHTML, like Gecko) '
                           'Chrome/131.0.0.0 Safari/537.36',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
             'Accept-Language': 'en-US,en;q=0.9',
         })
         self.rss_url = f"{TRUTH_SOCIAL_BASE_URL}/@{TRUTH_SOCIAL_USERNAME}/rss"
-        self.account_id = None  # 延迟获取
 
     def fetch_posts(self, limit=20):
-        """按优先级尝试多种方式获取推文。"""
-        # 方案1：RSS
-        posts = self._fetch_via_rss(limit)
-        if posts:
-            return posts
-
-        # 方案2：Mastodon兼容API（Truth Social基于Mastodon）
-        posts = self._fetch_via_mastodon_api(limit)
-        if posts:
-            return posts
-
-        # 方案3：公开时间线API
-        posts = self._fetch_via_public_api(limit)
-        if posts:
-            return posts
-
-        # 方案4：直接网页抓取（含JS渲染的内容）
-        posts = self._fetch_via_scrape(limit)
-        if posts:
-            return posts
-
-        logger.warning("所有Truth Social数据源均失败")
+        """按优先级尝试多种HTTP方式获取推文。"""
+        for method in [self._fetch_rss, self._fetch_mastodon_api, self._fetch_scrape]:
+            posts = method(limit)
+            if posts:
+                return posts
+        logger.warning("HTTP备用方案：所有Truth Social数据源均失败")
         return []
 
-    def _fetch_via_rss(self, limit):
-        """通过RSS订阅获取。"""
+    def _fetch_rss(self, limit):
         try:
             resp = self.session.get(self.rss_url, timeout=REQUEST_TIMEOUT)
             if resp.status_code != 200:
-                logger.debug(f"Truth Social RSS 返回 {resp.status_code}")
                 return []
-
             root = ET.fromstring(resp.text)
             posts = []
-
             for item in root.findall('.//item')[:limit]:
+                desc = item.findtext('description', '')
                 title = item.findtext('title', '')
-                description = item.findtext('description', '')
-                link = item.findtext('link', '')
-                pub_date = item.findtext('pubDate', '')
-                guid = item.findtext('guid', link)
-
-                content = self._clean_html(description or title)
+                content = BeautifulSoup(desc or title, 'html.parser').get_text(strip=True)
                 if not content:
                     continue
-
-                posts.append(self._make_post(
-                    post_id=self._extract_id(guid),
-                    content=content,
-                    created_at=pub_date,
-                    url=link,
-                    media_urls=self._extract_media_urls(description),
-                ))
-
-            logger.info(f"Truth Social RSS: 获取 {len(posts)} 条")
+                link = item.findtext('link', '')
+                guid = item.findtext('guid', link)
+                match = re.search(r'/(\d+)', guid or '')
+                post_id = match.group(1) if match else str(hash(content))
+                posts.append({
+                    'id': f"ts_{post_id}", 'source': 'truth_social',
+                    'content': content, 'created_at': item.findtext('pubDate', ''),
+                    'url': link, 'media_urls': [], 'is_repost': False,
+                })
+            if posts:
+                logger.info(f"HTTP RSS: 获取 {len(posts)} 条")
             return posts
-        except Exception as e:
-            logger.debug(f"Truth Social RSS失败: {e}")
+        except Exception:
             return []
 
-    def _fetch_via_mastodon_api(self, limit):
-        """通过Mastodon兼容API获取（Truth Social基于Mastodon分支）。"""
+    def _fetch_mastodon_api(self, limit):
         try:
-            # 先获取账号ID
-            if not self.account_id:
-                lookup_url = f"{TRUTH_SOCIAL_BASE_URL}/api/v1/accounts/lookup"
-                resp = self.session.get(
-                    lookup_url,
-                    params={'acct': TRUTH_SOCIAL_USERNAME},
-                    timeout=REQUEST_TIMEOUT
-                )
-                if resp.status_code == 200:
-                    self.account_id = resp.json().get('id')
-                else:
-                    logger.debug(f"Mastodon账号查询返回 {resp.status_code}")
-                    return []
-
-            if not self.account_id:
+            lookup = self.session.get(
+                f"{TRUTH_SOCIAL_BASE_URL}/api/v1/accounts/lookup",
+                params={'acct': TRUTH_SOCIAL_USERNAME}, timeout=REQUEST_TIMEOUT
+            )
+            if lookup.status_code != 200:
                 return []
-
-            # 获取推文
-            statuses_url = f"{TRUTH_SOCIAL_BASE_URL}/api/v1/accounts/{self.account_id}/statuses"
+            account_id = lookup.json().get('id')
+            if not account_id:
+                return []
             resp = self.session.get(
-                statuses_url,
-                params={
-                    'limit': limit,
-                    'exclude_replies': 'true',
-                    'exclude_reblogs': 'false',
-                },
+                f"{TRUTH_SOCIAL_BASE_URL}/api/v1/accounts/{account_id}/statuses",
+                params={'limit': limit, 'exclude_replies': 'true'}, timeout=REQUEST_TIMEOUT
+            )
+            if resp.status_code != 200:
+                return []
+            posts = []
+            for s in resp.json():
+                content = BeautifulSoup(s.get('content', ''), 'html.parser').get_text(strip=True)
+                if content:
+                    posts.append({
+                        'id': f"ts_{s['id']}", 'source': 'truth_social',
+                        'content': content, 'created_at': s.get('created_at', ''),
+                        'url': s.get('url', ''), 'media_urls': [],
+                        'is_repost': s.get('reblog') is not None,
+                    })
+            if posts:
+                logger.info(f"HTTP Mastodon API: 获取 {len(posts)} 条")
+            return posts
+        except Exception:
+            return []
+
+    def _fetch_scrape(self, limit):
+        try:
+            resp = self.session.get(
+                f"{TRUTH_SOCIAL_BASE_URL}/@{TRUTH_SOCIAL_USERNAME}",
                 timeout=REQUEST_TIMEOUT
             )
-
             if resp.status_code != 200:
-                logger.debug(f"Mastodon API返回 {resp.status_code}")
                 return []
-
-            statuses = resp.json()
-            posts = []
-
-            for status in statuses:
-                content = self._clean_html(status.get('content', ''))
-                if not content:
-                    continue
-
-                media_urls = [
-                    m.get('url', '')
-                    for m in status.get('media_attachments', [])
-                    if m.get('url')
-                ]
-
-                posts.append(self._make_post(
-                    post_id=str(status.get('id', '')),
-                    content=content,
-                    created_at=status.get('created_at', ''),
-                    url=status.get('url', ''),
-                    media_urls=media_urls,
-                    is_repost=status.get('reblog') is not None,
-                ))
-
-            logger.info(f"Truth Social Mastodon API: 获取 {len(posts)} 条")
-            return posts
-
-        except Exception as e:
-            logger.debug(f"Mastodon API失败: {e}")
-            return []
-
-    def _fetch_via_public_api(self, limit):
-        """通过Truth Social公开API获取。"""
-        try:
-            # Truth Social有时开放公开时间线
-            url = f"{TRUTH_SOCIAL_BASE_URL}/api/v1/truth/trending/truths"
-            resp = self.session.get(url, timeout=REQUEST_TIMEOUT)
-
-            if resp.status_code != 200:
-                logger.debug(f"Truth Social公开API返回 {resp.status_code}")
-                return []
-
-            truths = resp.json()
-            posts = []
-
-            for truth in truths:
-                # 只筛选特朗普的推文
-                account = truth.get('account', {})
-                username = account.get('username', '') or account.get('acct', '')
-                if username.lower() != TRUTH_SOCIAL_USERNAME.lower():
-                    continue
-
-                content = self._clean_html(truth.get('content', ''))
-                if not content:
-                    continue
-
-                posts.append(self._make_post(
-                    post_id=str(truth.get('id', '')),
-                    content=content,
-                    created_at=truth.get('created_at', ''),
-                    url=truth.get('url', ''),
-                ))
-
-            logger.info(f"Truth Social公开API: 获取 {len(posts)} 条")
-            return posts[:limit]
-
-        except Exception as e:
-            logger.debug(f"Truth Social公开API失败: {e}")
-            return []
-
-    def _fetch_via_scrape(self, limit):
-        """直接抓取Truth Social页面（最后手段）。"""
-        try:
-            url = f"{TRUTH_SOCIAL_BASE_URL}/@{TRUTH_SOCIAL_USERNAME}"
-            resp = self.session.get(url, timeout=REQUEST_TIMEOUT)
-            if resp.status_code != 200:
-                logger.debug(f"Truth Social页面抓取返回 {resp.status_code}")
-                return []
-
             soup = BeautifulSoup(resp.text, 'html.parser')
             posts = []
-
-            # 尝试从页面JSON数据中提取（SPA通常会内嵌初始数据）
-            scripts = soup.find_all('script', type='application/json')
-            for script in scripts:
+            for script in soup.find_all('script', type='application/json'):
                 try:
                     data = json.loads(script.string or '{}')
-                    posts.extend(self._extract_posts_from_json(data, limit))
+                    # 递归查找推文对象
+                    posts.extend(self._find_statuses(data, limit))
                 except (json.JSONDecodeError, TypeError):
                     continue
-
             if posts:
-                logger.info(f"Truth Social JSON提取: 获取 {len(posts)} 条")
-                return posts[:limit]
-
-            # 回退到DOM解析
-            status_elements = soup.find_all('div', class_=re.compile(r'status'))
-            for elem in status_elements[:limit]:
-                content_elem = elem.find('div', class_=re.compile(r'content|text'))
-                if not content_elem:
-                    continue
-
-                content = content_elem.get_text(strip=True)
-                if not content:
-                    continue
-
-                link_elem = elem.find('a', href=re.compile(r'/@\w+/\d+'))
-                post_url = link_elem['href'] if link_elem else ''
-                post_id = self._extract_id(post_url)
-
-                posts.append(self._make_post(
-                    post_id=post_id or str(hash(content)),
-                    content=content,
-                    url=f"{TRUTH_SOCIAL_BASE_URL}{post_url}" if post_url else '',
-                ))
-
-            logger.info(f"Truth Social DOM抓取: 获取 {len(posts)} 条")
-            return posts
-
-        except Exception as e:
-            logger.debug(f"Truth Social页面抓取失败: {e}")
+                logger.info(f"HTTP Scrape (JSON): 获取 {len(posts)} 条")
+            return posts[:limit]
+        except Exception:
             return []
 
-    def _extract_posts_from_json(self, data, limit):
-        """从页面内嵌JSON中递归提取推文数据。"""
+    def _find_statuses(self, data, limit, depth=0):
+        if depth > 8 or not data:
+            return []
         posts = []
         if isinstance(data, dict):
-            # 找到包含content和account的对象
             if 'content' in data and 'account' in data:
-                account = data.get('account', {})
-                username = account.get('username', '') or account.get('acct', '')
-                if username.lower() == TRUTH_SOCIAL_USERNAME.lower():
-                    content = self._clean_html(data.get('content', ''))
-                    if content:
-                        posts.append(self._make_post(
-                            post_id=str(data.get('id', hash(content))),
-                            content=content,
-                            created_at=data.get('created_at', ''),
-                            url=data.get('url', ''),
-                        ))
-            # 递归搜索
-            for value in data.values():
-                if isinstance(value, (dict, list)):
-                    posts.extend(self._extract_posts_from_json(value, limit))
-                    if len(posts) >= limit:
-                        break
+                content = BeautifulSoup(data.get('content', ''), 'html.parser').get_text(strip=True)
+                if content:
+                    posts.append({
+                        'id': f"ts_{data.get('id', hash(content))}", 'source': 'truth_social',
+                        'content': content, 'created_at': data.get('created_at', ''),
+                        'url': data.get('url', ''), 'media_urls': [],
+                        'is_repost': data.get('reblog') is not None,
+                    })
+            for v in data.values():
+                if len(posts) < limit:
+                    posts.extend(self._find_statuses(v, limit, depth + 1))
         elif isinstance(data, list):
             for item in data:
-                if isinstance(item, (dict, list)):
-                    posts.extend(self._extract_posts_from_json(item, limit))
-                    if len(posts) >= limit:
-                        break
-        return posts
-
-    @staticmethod
-    def _make_post(post_id, content, created_at=None, url='',
-                   media_urls=None, is_repost=False):
-        """构造标准推文字典。"""
-        return {
-            'id': f"ts_{post_id}",
-            'source': 'truth_social',
-            'content': content,
-            'created_at': created_at or datetime.now(timezone.utc).isoformat(),
-            'url': url,
-            'media_urls': media_urls or [],
-            'is_repost': is_repost,
-        }
-
-    @staticmethod
-    def _clean_html(html_text):
-        """清除HTML标签。"""
-        if not html_text:
-            return ''
-        soup = BeautifulSoup(html_text, 'html.parser')
-        return soup.get_text(strip=True)
-
-    @staticmethod
-    def _extract_id(url_or_guid):
-        """从URL或GUID中提取数字ID。"""
-        if not url_or_guid:
-            return str(int(time.time() * 1000))
-        match = re.search(r'/(\d+)', url_or_guid)
-        return match.group(1) if match else str(hash(url_or_guid))
-
-    @staticmethod
-    def _extract_media_urls(html_text):
-        """从HTML中提取图片/视频URL。"""
-        if not html_text:
-            return []
-        soup = BeautifulSoup(html_text, 'html.parser')
-        urls = []
-        for img in soup.find_all('img'):
-            src = img.get('src', '')
-            if src and not src.endswith('.svg'):
-                urls.append(src)
-        for video in soup.find_all('video'):
-            src = video.get('src', '')
-            if src:
-                urls.append(src)
-        return urls
+                if len(posts) < limit:
+                    posts.extend(self._find_statuses(item, limit, depth + 1))
+        return posts[:limit]
 
 
-class TwitterMonitor:
-    """通过Twitter API v2监控特朗普的X账号。"""
+class HttpTwitterMonitor:
+    """通过Twitter API v2获取推文（需Bearer Token）。"""
 
     API_BASE = "https://api.twitter.com/2"
 
@@ -372,89 +497,89 @@ class TwitterMonitor:
             })
 
     def is_configured(self):
-        """检查Twitter API是否已配置。"""
         return bool(self.bearer_token)
 
     def fetch_posts(self, limit=10):
-        """获取特朗普最近的推文。"""
         if not self.is_configured():
-            logger.warning("Twitter API未配置（缺少TWITTER_BEARER_TOKEN）")
+            logger.debug("Twitter API未配置")
             return []
-
         try:
-            url = f"{self.API_BASE}/users/{TRUMP_TWITTER_USER_ID}/tweets"
-            params = {
-                'max_results': min(limit, 100),
-                'tweet.fields': 'created_at,text,referenced_tweets,attachments',
-                'exclude': 'replies',
-            }
-
-            resp = self.session.get(url, params=params, timeout=REQUEST_TIMEOUT)
-
-            if resp.status_code == 429:
-                logger.warning("Twitter API被限速")
-                return []
-
+            resp = self.session.get(
+                f"{self.API_BASE}/users/{TRUMP_TWITTER_USER_ID}/tweets",
+                params={
+                    'max_results': min(limit, 100),
+                    'tweet.fields': 'created_at,text,referenced_tweets',
+                    'exclude': 'replies',
+                },
+                timeout=REQUEST_TIMEOUT
+            )
             if resp.status_code != 200:
-                logger.warning(f"Twitter API返回 {resp.status_code}: {resp.text[:200]}")
+                logger.debug(f"Twitter API返回 {resp.status_code}")
                 return []
-
-            data = resp.json()
-            tweets = data.get('data', [])
             posts = []
-
-            for tweet in tweets:
+            for tweet in resp.json().get('data', []):
                 is_repost = any(
-                    ref.get('type') == 'retweeted'
-                    for ref in tweet.get('referenced_tweets', [])
+                    r.get('type') == 'retweeted'
+                    for r in tweet.get('referenced_tweets', [])
                 )
-
                 posts.append({
-                    'id': f"tw_{tweet['id']}",
-                    'source': 'twitter',
+                    'id': f"tw_{tweet['id']}", 'source': 'twitter',
                     'content': tweet.get('text', ''),
                     'created_at': tweet.get('created_at', ''),
                     'url': f"https://x.com/{TRUMP_TWITTER_USERNAME}/status/{tweet['id']}",
-                    'media_urls': [],
-                    'is_repost': is_repost,
+                    'media_urls': [], 'is_repost': is_repost,
                 })
-
-            logger.info(f"Twitter API: 获取 {len(posts)} 条推文")
+            if posts:
+                logger.info(f"Twitter API: 获取 {len(posts)} 条")
             return posts
-
         except Exception as e:
-            logger.error(f"Twitter API获取失败: {e}")
+            logger.error(f"Twitter API失败: {e}")
             return []
 
 
+# ============================================================
+# 统一监控器
+# ============================================================
+
 class TrumpSocialMonitor:
-    """统一监控器：聚合所有特朗普社交媒体源。"""
+    """统一监控器：优先Playwright浏览器，降级到HTTP。"""
 
     def __init__(self):
-        self.truth_social = TruthSocialMonitor()
-        self.twitter = TwitterMonitor()
+        # Playwright浏览器方案
+        self.pw_truth = PlaywrightTruthSocialMonitor()
+        self.pw_twitter = PlaywrightTwitterMonitor()
+
+        # HTTP备用方案
+        self.http_truth = HttpTruthSocialMonitor()
+        self.http_twitter = HttpTwitterMonitor()
+
+        # 检测Playwright是否可用
+        self._playwright_available = self._check_playwright()
+
+    def _check_playwright(self):
+        try:
+            from playwright.sync_api import sync_playwright
+            pw = sync_playwright().start()
+            browser = pw.chromium.launch(headless=True, args=['--no-sandbox'])
+            browser.close()
+            pw.stop()
+            logger.info("Playwright可用，将优先使用浏览器渲染")
+            return True
+        except Exception as e:
+            logger.info(f"Playwright不可用（{e}），使用HTTP备用方案")
+            return False
 
     def fetch_all_posts(self, limit=20):
-        """从所有已配置的数据源获取推文。
-
-        Returns:
-            标准化的推文字典列表，按时间倒序排列。
-        """
+        """从所有已配置的数据源获取推文。"""
         all_posts = []
 
         # Truth Social
-        try:
-            ts_posts = self.truth_social.fetch_posts(limit)
-            all_posts.extend(ts_posts)
-        except Exception as e:
-            logger.error(f"Truth Social监控错误: {e}")
+        ts_posts = self._fetch_truth_social(limit)
+        all_posts.extend(ts_posts)
 
         # Twitter/X
-        try:
-            tw_posts = self.twitter.fetch_posts(limit)
-            all_posts.extend(tw_posts)
-        except Exception as e:
-            logger.error(f"Twitter监控错误: {e}")
+        tw_posts = self._fetch_twitter(limit)
+        all_posts.extend(tw_posts)
 
         # 按时间倒序
         all_posts.sort(key=lambda p: p.get('created_at', ''), reverse=True)
@@ -464,3 +589,39 @@ class TrumpSocialMonitor:
         logger.info(f"总计获取: {len(all_posts)} 条 (Truth Social: {ts_count}, Twitter: {tw_count})")
 
         return all_posts
+
+    def _fetch_truth_social(self, limit):
+        """获取Truth Social推文，Playwright优先。"""
+        if self._playwright_available:
+            try:
+                posts = self.pw_truth.fetch_posts(limit)
+                if posts:
+                    return posts
+                logger.info("Playwright Truth Social无结果，降级到HTTP")
+            except Exception as e:
+                logger.warning(f"Playwright Truth Social异常: {e}")
+
+        # HTTP备用
+        try:
+            return self.http_truth.fetch_posts(limit)
+        except Exception as e:
+            logger.error(f"HTTP Truth Social异常: {e}")
+            return []
+
+    def _fetch_twitter(self, limit):
+        """获取Twitter推文，Playwright优先。"""
+        if self._playwright_available:
+            try:
+                posts = self.pw_twitter.fetch_posts(limit)
+                if posts:
+                    return posts
+                logger.info("Playwright Twitter无结果，降级到HTTP")
+            except Exception as e:
+                logger.warning(f"Playwright Twitter异常: {e}")
+
+        # HTTP备用 (需要API Key)
+        try:
+            return self.http_twitter.fetch_posts(limit)
+        except Exception as e:
+            logger.error(f"HTTP Twitter异常: {e}")
+            return []
