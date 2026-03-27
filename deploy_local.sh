@@ -14,6 +14,10 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
+VENV_DIR="$SCRIPT_DIR/.venv"
+PYTHON="$VENV_DIR/bin/python3"
+PIP="$VENV_DIR/bin/pip3"
+
 # 颜色输出
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -25,17 +29,33 @@ warn() { echo -e "${YELLOW}[警告]${NC} $1"; }
 err() { echo -e "${RED}[错误]${NC} $1"; }
 
 # ============================================================
-# 安装依赖
+# 创建虚拟环境 + 安装依赖
 # ============================================================
 install_deps() {
+    # 创建虚拟环境
+    if [ ! -d "$VENV_DIR" ]; then
+        log "创建Python虚拟环境..."
+        python3 -m venv "$VENV_DIR"
+    fi
+
     log "安装Python依赖..."
-    pip3 install -q requests beautifulsoup4 openai playwright
+    "$PIP" install -q --upgrade pip
+    "$PIP" install -q requests beautifulsoup4 openai playwright
 
     log "安装Playwright浏览器（Chromium）..."
-    python3 -m playwright install chromium
-    python3 -m playwright install-deps chromium 2>/dev/null || true
+    "$PYTHON" -m playwright install chromium
 
     log "依赖安装完成！"
+}
+
+# ============================================================
+# 确保虚拟环境存在
+# ============================================================
+ensure_venv() {
+    if [ ! -f "$PYTHON" ]; then
+        err "虚拟环境不存在，请先运行: ./deploy_local.sh install"
+        exit 1
+    fi
 }
 
 # ============================================================
@@ -44,7 +64,7 @@ install_deps() {
 check_config() {
     log "验证配置..."
 
-    python3 -c "
+    "$PYTHON" -c "
 from trump_config import *
 issues = []
 
@@ -61,7 +81,7 @@ if not EMAIL_RECIPIENTS or not EMAIL_RECIPIENTS[0]:
 try:
     from playwright.sync_api import sync_playwright
     pw = sync_playwright().start()
-    b = pw.chromium.launch(headless=True, args=['--no-sandbox'])
+    b = pw.chromium.launch(headless=True)
     b.close()
     pw.stop()
     print('  Playwright: OK')
@@ -90,17 +110,20 @@ case "${1:-install}" in
         log "部署完成！运行 ./deploy_local.sh run 启动监控"
         ;;
     run)
+        ensure_venv
         log "=== 启动持续监控 ==="
         check_config
         echo ""
         log "启动中... (Ctrl+C停止)"
-        python3 trump_sentinel.py --loop --interval 30
+        "$PYTHON" trump_sentinel.py --loop --interval 30
         ;;
     test)
+        ensure_venv
         log "=== 单次测试运行 ==="
-        python3 trump_sentinel.py --dry-run
+        "$PYTHON" trump_sentinel.py --dry-run
         ;;
     check)
+        ensure_venv
         check_config
         ;;
     *)
